@@ -1,0 +1,26 @@
+[Unit]
+Description=Metadata-only RSS feed service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rssfeed
+Group=rssfeed
+WorkingDirectory=/opt/rss-feed
+EnvironmentFile=/etc/rss-feed.env
+ExecStart=/opt/rss-feed/.venv/bin/gunicorn -c /opt/rss-feed/gunicorn.conf.py app.server:app
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+
