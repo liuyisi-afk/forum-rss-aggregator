@@ -1,0 +1,22 @@
+services:
+  app:
+    image: ${IMAGE:-forum-rss-aggregator:latest}
+    restart: unless-stopped
+    ports:
+      - "28888:28888"
+    env_file: .env.prod
+    volumes:
+      - feed-data:/var/rss-feed
+
+  snapshot:
+    image: ${IMAGE:-forum-rss-aggregator:latest}
+    restart: unless-stopped
+    environment:
+      RUN_MODE: snapshot-loop
+      SNAPSHOT_INTERVAL: "86400"
+    env_file: .env.prod
+    volumes:
+      - feed-data:/var/rss-feed
+
+volumes:
+  feed-data:

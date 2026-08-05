@@ -58,6 +58,29 @@ def build_test_settings() -> Settings:
     )
 
 
+def test_caoliu_digest_returns_snapshot_or_404(monkeypatch, tmp_path) -> None:
+    """验证精华快照端点：文件存在返回 RSS，缺失返回 404。
+
+    参数：
+        monkeypatch: pytest 环境变量隔离工具。
+        tmp_path: 临时目录。
+    返回值：
+        无；断言失败时由 pytest 报错。
+    """
+    snapshot = tmp_path / "digest.xml"
+    app = create_app(build_test_settings())
+
+    response_missing = app.test_client().get("/rss/caoliu-digest.xml")
+    assert response_missing.status_code == 404
+
+    snapshot.write_bytes(b"<?xml version='1.0'?><rss version='2.0'><channel/></rss>")
+    monkeypatch.setenv("CAOLIU_DIGEST_FILE", str(snapshot))
+    response_ready = app.test_client().get("/rss/caoliu-digest.xml")
+    assert response_ready.status_code == 200
+    assert response_ready.content_type == "application/rss+xml; charset=utf-8"
+    assert response_ready.headers["Cache-Control"] == "public, max-age=3600"
+
+
 def test_healthz_returns_ok_without_upstream_request() -> None:
     """验证健康检查仅反映进程状态，不触发目标站点抓取。
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -102,7 +104,9 @@ def create_feed_services(settings: Settings) -> dict[str, FeedProvider]:
     providers["/rss/forum-b.xml"] = AggregateFeedService(
         settings=settings,
         feed_title="论坛 B - 板块一/板块二/板块三",
-        source_url=FORUM_B_INDEX_URL,
+        source_url=os.getenv(
+            "FORUM_B_INDEX_URL", FORUM_B_INDEX_URL
+        ),
         public_feed_url=f"{public_base_url}/rss/forum-b.xml",
         children=[services[route] for route in forum_b_routes],
     )
@@ -177,6 +181,30 @@ def create_app(
             JSON 响应及 HTTP 状态码。
         """
         return jsonify({"status": "ok"}), 200
+
+    @app.get("/rss/caoliu-digest.xml")
+    def caoliu_digest() -> tuple[Response, int]:
+        """返回论坛 A 精华帖快照 RSS（由定时快照任务生成，图片过期帖也保留）。
+
+        参数：
+            无。
+        返回值：
+            快照 RSS XML；快照尚未生成时返回 404。
+        """
+        snapshot_path = os.getenv(
+            "CAOLIU_DIGEST_FILE", "/opt/rss-feed/var/caoliu-digest.xml"
+        )
+        try:
+            content = Path(snapshot_path).read_bytes()
+        except OSError:
+            return jsonify({"error": "snapshot_not_ready"}), 404
+
+        response = Response(
+            content, content_type="application/rss+xml; charset=utf-8"
+        )
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response, 200
+
 
     for route, feed_service in services.items():
         endpoint = "feed_" + route.strip("/").replace("/", "_").replace(".", "_")

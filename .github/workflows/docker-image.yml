@@ -1,0 +1,54 @@
+name: Build feeds and deploy to Pages
+
+on:
+  schedule:
+    # 每 3 小时运行一次（UTC）
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # 真实来源地址（仅本私有仓库可见）
+  SOURCE_URL: https://t66y.com/thread0806.php?fid=16
+  FORUM_B_BASE_URL: https://forum.91porn.com
+  FORUM_B_INDEX_URL: https://forum.91porn.com/index.php
+  SNAPSHOT_BASE_URL: https://t66y.com/thread0806.php?fid=16&search=digest&page={page}
+  PUBLIC_BASE_URL: https://rss-feed-6z0.pages.dev
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+  CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
+  CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate RSS feeds
+        run: python scripts/build_feeds.py public
+
+      - name: Commit feeds back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public
+          if git diff --cached --quiet; then
+            echo "no feed changes"
+          else
+            git commit -m "chore: refresh RSS feeds [skip ci]"
+            git push
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed

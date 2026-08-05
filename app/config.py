@@ -135,12 +135,15 @@ def get_feed_sources(settings: Settings) -> list[FeedSource]:
             public_feed_url=settings.public_feed_url,
         )
     ]
+    forum_b_base_url = os.getenv(
+        "FORUM_B_BASE_URL", "https://forum-b.example.com"
+    ).rstrip("/")
     for source_key, fid, section_name in FORUM_B_FEEDS:
         route = f"/rss/{source_key}.xml"
         sources.append(
             FeedSource(
                 key=source_key,
-                source_url=f"https://forum-b.example.com/forumdisplay.php?fid={fid}",
+                source_url=f"{forum_b_base_url}/forumdisplay.php?fid={fid}",
                 feed_title=f"论坛 B - {section_name}",
                 route=route,
                 public_feed_url=f"{public_base_url}{route}",
@@ -150,7 +153,9 @@ def get_feed_sources(settings: Settings) -> list[FeedSource]:
     sources.append(
         FeedSource(
             key="forum-b-highlights",
-            source_url=FORUM_B_INDEX_URL,
+            source_url=os.getenv(
+                "FORUM_B_INDEX_URL", "https://forum-b.example.com/index.php"
+            ),
             feed_title="论坛 B - 最新精华/最新点赞/本周热门",
             route="/rss/forum-b-highlights.xml",
             public_feed_url=f"{public_base_url}/rss/forum-b-highlights.xml",
