@@ -51,4 +51,4 @@ jobs:
           fi
 
       - name: Deploy to Cloudflare Pages
-        run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed
+        run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
