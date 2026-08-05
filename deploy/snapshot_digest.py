@@ -90,7 +90,7 @@ def main() -> None:
 
     content = build_rss(
         items,
-        "草榴社区 - 达盖尔的旗帜 - 精华",
+        os.getenv("SNAPSHOT_TITLE", "论坛 A 示例订阅 - 精华"),
         DIGEST_BASE_URL.format(page=1),
         PUBLIC_FEED_URL,
         datetime.now(timezone.utc),

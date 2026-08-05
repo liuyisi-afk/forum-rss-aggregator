@@ -10,12 +10,15 @@ permissions:
   contents: write
 
 env:
-  # real source URLs (private repo only)
-  SOURCE_URL: https://t66y.com/thread0806.php?fid=16
-  FORUM_B_BASE_URL: https://forum.91porn.com
-  FORUM_B_INDEX_URL: https://forum.91porn.com/index.php
-  SNAPSHOT_BASE_URL: https://t66y.com/thread0806.php?fid=16&search=digest&page={page}
-  PUBLIC_BASE_URL: https://rss-feed-6z0.pages.dev
+  # real values are injected from repo secrets (not visible in public repo)
+  SOURCE_URL: ${{ secrets.SOURCE_URL }}
+  FORUM_B_BASE_URL: ${{ secrets.FORUM_B_BASE_URL }}
+  FORUM_B_INDEX_URL: ${{ secrets.FORUM_B_INDEX_URL }}
+  SNAPSHOT_BASE_URL: ${{ secrets.SNAPSHOT_BASE_URL }}
+  PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+  FEED_TITLE_A: ${{ secrets.FEED_TITLE_A }}
+  FEED_TITLE_B: ${{ secrets.FEED_TITLE_B }}
+  SECTIONS_B: ${{ secrets.SECTIONS_B }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
   CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
   CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}

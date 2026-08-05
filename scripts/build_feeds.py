@@ -27,15 +27,19 @@ USER_AGENT = (
 PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 200
 EMPTY_PAGE_LIMIT = 2
-SECTION_NAMES = {
-    "19": "91自拍达人原创申请",
-    "21": "我爱我妻",
-    "33": "性趣闲谈",
-}
-SOURCE_NAMES = {
-    "forum-a": "草榴社区 - 达盖尔的旗帜",
-    "forum-b": "91自拍论坛",
-}
+FIDS_B = ("19", "21", "33")
+
+
+def get_section_names() -> dict:
+    """从环境变量读取论坛 B 板块名，默认使用中性占位名。
+
+    参数：
+        无。
+    返回值：
+        fid 到板块名的映射。
+    """
+    raw_names = os.getenv("SECTIONS_B", "板块一;板块二;板块三").split(";")
+    return {fid: name.strip() for fid, name in zip(FIDS_B, raw_names)}
 
 
 def fetch_items(fetcher: ForumFetcher, url: str, parser, keep_images: bool) -> list:
@@ -139,6 +143,9 @@ def main() -> None:
     forum_b_base = os.getenv("FORUM_B_BASE_URL", "https://forum-b.example.com").rstrip("/")
     forum_b_index = os.getenv("FORUM_B_INDEX_URL", "https://forum-b.example.com/index.php")
     public_base_url = os.getenv("PUBLIC_BASE_URL", "https://rss.example.com").rstrip("/")
+    feed_title_a = os.getenv("FEED_TITLE_A", "论坛 A 示例订阅")
+    feed_title_b = os.getenv("FEED_TITLE_B", "论坛 B")
+    section_names = get_section_names()
     digest_base_url = os.getenv(
         "SNAPSHOT_BASE_URL",
         "https://forum-a.example.com/thread0806.php?fid=16&search=digest&page={page}",
@@ -157,7 +164,7 @@ def main() -> None:
             fetcher, source_url_a, parse_forum_a_items, keep_images=True
         )
         write_feed(
-            output_dir, "rss.xml", SOURCE_NAMES["forum-a"], source_url_a, items_a, public_base_url
+            output_dir, "rss.xml", feed_title_a, source_url_a, items_a, public_base_url
         )
     except Exception as error:
         failures.append(f"forum-a: {type(error).__name__}")
@@ -168,7 +175,7 @@ def main() -> None:
         write_feed(
             output_dir,
             "caoliu-digest.xml",
-            "草榴社区 - 达盖尔的旗帜 - 精华",
+            f"{feed_title_a} - 精华",
             digest_base_url.format(page=1),
             items_digest,
             public_base_url,
@@ -178,7 +185,7 @@ def main() -> None:
 
     # 论坛 B（91）三个板块
     section_items = {}
-    for fid, section_name in SECTION_NAMES.items():
+    for fid, section_name in section_names.items():
         try:
             url = f"{forum_b_base}/forumdisplay.php?fid={fid}"
             items = fetch_items(fetcher, url, parse_forum_b_items, keep_images=True)
@@ -186,7 +193,7 @@ def main() -> None:
             write_feed(
                 output_dir,
                 f"forum-b-fid-{fid}.xml",
-                f"{SOURCE_NAMES['forum-b']} - {section_name}",
+                f"{feed_title_b} - {section_name}",
                 url,
                 items,
                 public_base_url,
@@ -201,7 +208,7 @@ def main() -> None:
         write_feed(
             output_dir,
             "forum-b-highlights.xml",
-            f"{SOURCE_NAMES['forum-b']} - 最新精华/最新点赞/本周热门",
+            f"{feed_title_b} - 最新精华/最新点赞/本周热门",
             forum_b_index,
             items_home,
             public_base_url,
@@ -221,7 +228,7 @@ def main() -> None:
         write_feed(
             output_dir,
             "forum-b.xml",
-            "91自拍论坛 - 91自拍达人原创申请/我爱我妻/性趣闲谈",
+            f"{feed_title_b} - {'/'.join(section_names.values())}",
             forum_b_index,
             sort_by_published(merged),
             public_base_url,
