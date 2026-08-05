@@ -158,7 +158,7 @@ def main() -> None:
     )
     failures = []
 
-    # 论坛 A（草榴）第一页带图帖
+    # 论坛 A 第一页带图帖
     try:
         items_a = fetch_items(
             fetcher, source_url_a, parse_forum_a_items, keep_images=True
@@ -183,7 +183,7 @@ def main() -> None:
     except Exception as error:
         failures.append(f"digest: {type(error).__name__}")
 
-    # 论坛 B（91）三个板块
+    # 论坛 B 三个板块
     section_items = {}
     for fid, section_name in section_names.items():
         try:
