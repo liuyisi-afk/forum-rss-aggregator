@@ -2,7 +2,7 @@ name: Build feeds and deploy to Pages
 
 on:
   schedule:
-    # 每 3 小时运行一次（UTC）
+    # every 3 hours (UTC)
     - cron: "0 */3 * * *"
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 env:
-  # 真实来源地址（仅本私有仓库可见）
+  # real source URLs (private repo only)
   SOURCE_URL: https://t66y.com/thread0806.php?fid=16
   FORUM_B_BASE_URL: https://forum.91porn.com
   FORUM_B_INDEX_URL: https://forum.91porn.com/index.php
