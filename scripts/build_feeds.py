@@ -88,6 +88,73 @@ def fetch_digest_items(fetcher: ForumFetcher, base_url: str) -> list:
     return all_items
 
 
+def fetch_b_section_items(
+    fetcher: ForumFetcher, base_url: str, fid: str, page_limit: int
+) -> list:
+    """抓取论坛 B 单个板块前若干页并按 thread_id 去重。
+
+    参数：
+        fetcher: 限速下载器。
+        base_url: 板块地址前缀。
+        fid: 板块编号。
+        page_limit: 最多抓取页数。
+    返回值：
+        按发现顺序排列的 FeedItem 列表。
+    """
+    all_items = []
+    seen_thread_ids = set()
+    for page in range(1, page_limit + 1):
+        url = f"{base_url}/forumdisplay.php?fid={fid}&page={page}"
+        html = fetcher.fetch_html(url)
+        items = parse_forum_b_items(
+            html, url, PAGE_SIZE, keep_image_posts_only=True
+        )
+        new_items = [item for item in items if item.thread_id not in seen_thread_ids]
+        if not new_items:
+            break
+        for item in new_items:
+            seen_thread_ids.add(item.thread_id)
+            all_items.append(item)
+    return all_items
+
+
+def fetch_b_digest_items(
+    fetcher: ForumFetcher, base_url: str, fid: str, page_limit: int
+) -> list:
+    """遍历论坛 B 板块精华帖全部分页并按 thread_id 去重。
+
+    参数：
+        fetcher: 限速下载器。
+        base_url: 板块地址前缀。
+        fid: 板块编号。
+        page_limit: 最多抓取页数，0 表示不限制。
+    返回值：
+        按发现顺序排列的 FeedItem 列表。
+    """
+    all_items = []
+    seen_thread_ids = set()
+    empty_pages = 0
+    page = 1
+    while page_limit == 0 or page <= page_limit:
+        url = f"{base_url}/forumdisplay.php?fid={fid}&filter=digest&page={page}"
+        html = fetcher.fetch_html(url)
+        items = parse_forum_b_items(
+            html, url, PAGE_SIZE, keep_image_posts_only=False
+        )
+        new_items = [item for item in items if item.thread_id not in seen_thread_ids]
+        if not new_items:
+            empty_pages += 1
+            if empty_pages >= 2:
+                break
+        else:
+            empty_pages = 0
+            for item in new_items:
+                seen_thread_ids.add(item.thread_id)
+                all_items.append(item)
+        page += 1
+    return all_items
+
+
 def sort_by_published(items: list) -> list:
     """按发布时间倒序，无时间条目排最后。
 
@@ -146,6 +213,9 @@ def main() -> None:
     feed_title_a = os.getenv("FEED_TITLE_A", "论坛 A 示例订阅")
     feed_title_b = os.getenv("FEED_TITLE_B", "论坛 B")
     section_names = get_section_names()
+    b_page_limit = int(os.getenv("B_PAGE_LIMIT", "5"))
+    build_digest_b = os.getenv("BUILD_DIGEST_B", "0") == "1"
+    digest_page_limit = int(os.getenv("DIGEST_PAGE_LIMIT", "0"))
     digest_base_url = os.getenv(
         "SNAPSHOT_BASE_URL",
         "https://forum-a.example.com/thread0806.php?fid=16&search=digest&page={page}",
@@ -183,12 +253,14 @@ def main() -> None:
     except Exception as error:
         failures.append(f"digest: {type(error).__name__}")
 
-    # 论坛 B 三个板块
+    # 论坛 B 三个板块（前若干页）
     section_items = {}
     for fid, section_name in section_names.items():
         try:
             url = f"{forum_b_base}/forumdisplay.php?fid={fid}"
-            items = fetch_items(fetcher, url, parse_forum_b_items, keep_images=True)
+            items = fetch_b_section_items(
+                fetcher, forum_b_base, fid, b_page_limit
+            )
             section_items[fid] = items
             write_feed(
                 output_dir,
@@ -233,6 +305,32 @@ def main() -> None:
             sort_by_published(merged),
             public_base_url,
         )
+
+    # 论坛 B 精华归档（每日低频任务，BUILD_DIGEST_B=1 时启用）
+    if build_digest_b:
+        digest_items = []
+        digest_seen = set()
+        for fid in section_names:
+            try:
+                items = fetch_b_digest_items(
+                    fetcher, forum_b_base, fid, digest_page_limit
+                )
+                for item in items:
+                    if item.thread_id not in digest_seen:
+                        digest_seen.add(item.thread_id)
+                        digest_items.append(item)
+                print(f"forum-b-{fid} digest: {len(items)} items")
+            except Exception as error:
+                failures.append(f"forum-b-{fid}-digest: {type(error).__name__}")
+        if digest_items:
+            write_feed(
+                output_dir,
+                "forum-b-digest.xml",
+                f"{feed_title_b} - 精华归档",
+                f"{forum_b_base}/forumdisplay.php?fid=19&filter=digest",
+                sort_by_published(digest_items),
+                public_base_url,
+            )
 
     if failures:
         print("FAILURES:", "; ".join(failures))

@@ -2,8 +2,10 @@ name: Build feeds and deploy to Pages
 
 on:
   schedule:
-    # every 3 hours (UTC)
-    - cron: "0 */3 * * *"
+    # every 30 minutes
+    - cron: "0,30 * * * *"
+    # daily at 05:00 UTC: full digest archive for forum B
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -39,6 +41,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Generate RSS feeds
+        env:
+          BUILD_DIGEST_B: ${{ github.event.schedule == '0 5 * * *' && '1' || '0' }}
         run: python scripts/build_feeds.py public
 
       - name: Commit feeds back to repo
