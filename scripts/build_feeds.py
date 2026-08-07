@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +29,26 @@ PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 200
 EMPTY_PAGE_LIMIT = 2
 FIDS_B = ("19", "21", "33")
+
+
+def fetch_with_retry(fetcher: ForumFetcher, url: str, retries: int = 3) -> str:
+    """带重试的抓取，容忍上游瞬时失败。
+
+    参数：
+        fetcher: 限速下载器。
+        url: 页面地址。
+        retries: 最大尝试次数。
+    返回值：
+        HTML 文本。
+    """
+    for attempt in range(retries):
+        try:
+            return fetcher.fetch_html(url)
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(10)
+    raise RuntimeError("unreachable")
 
 
 def get_section_names() -> dict:
@@ -53,7 +74,7 @@ def fetch_items(fetcher: ForumFetcher, url: str, parser, keep_images: bool) -> l
     返回值：
         FeedItem 列表。
     """
-    html = fetcher.fetch_html(url)
+    html = fetch_with_retry(fetcher, url)
     return parser(html, url, PAGE_SIZE, keep_images)
 
 
@@ -72,7 +93,7 @@ def fetch_digest_items(fetcher: ForumFetcher, base_url: str) -> list:
     page = 1
     while page <= DEFAULT_MAX_PAGES:
         url = base_url.format(page=page)
-        html = fetcher.fetch_html(url)
+        html = fetch_with_retry(fetcher, url)
         items = parse_forum_a_items(html, url, PAGE_SIZE, keep_image_posts_only=False)
         new_items = [item for item in items if item.thread_id not in seen_thread_ids]
         if not new_items:
@@ -105,7 +126,7 @@ def fetch_b_section_items(
     seen_thread_ids = set()
     for page in range(1, page_limit + 1):
         url = f"{base_url}/forumdisplay.php?fid={fid}&page={page}"
-        html = fetcher.fetch_html(url)
+        html = fetch_with_retry(fetcher, url)
         items = parse_forum_b_items(
             html, url, PAGE_SIZE, keep_image_posts_only=True
         )
@@ -137,7 +158,7 @@ def fetch_b_digest_items(
     page = 1
     while page_limit == 0 or page <= page_limit:
         url = f"{base_url}/forumdisplay.php?fid={fid}&filter=digest&page={page}"
-        html = fetcher.fetch_html(url)
+        html = fetch_with_retry(fetcher, url)
         items = parse_forum_b_items(
             html, url, PAGE_SIZE, keep_image_posts_only=False
         )
@@ -275,7 +296,7 @@ def main() -> None:
 
     # 论坛 B 首页精选（解析器无图片过滤参数，单独调用）
     try:
-        home_html = fetcher.fetch_html(forum_b_index)
+        home_html = fetch_with_retry(fetcher, forum_b_index)
         items_home = parse_forum_b_home_items(home_html, forum_b_index, PAGE_SIZE)
         write_feed(
             output_dir,
