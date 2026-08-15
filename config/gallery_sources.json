@@ -102,13 +102,6 @@
       "link_pattern": "/post_id/\\d+"
     },
     {
-      "key": "emonl",
-      "title": "Emonl - 日模Cos",
-      "url": "https://www.emonl.com/cosplay/",
-      "parser": "links",
-      "link_pattern": "^/\\d+\\.html$"
-    },
-    {
       "key": "nudecosplaygirls",
       "title": "NudeCosplayGirls - 亚模Cos",
       "url": "https://nudecosplaygirls.com/hot/",
