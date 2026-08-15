@@ -12,9 +12,16 @@ from urllib.parse import urlparse
 from flask import Flask, Response, jsonify
 
 from app.config import FORUM_B_INDEX_URL, Settings, get_feed_sources, get_settings
+from app.feed import build_opml
 from app.fetcher import ForumFetcher
 from app.models import FeedResult, FeedSource
-from app.parser import parse_forum_b_home_items, parse_forum_b_items, parse_forum_a_items
+from app.parser import (
+    parse_forum_b_home_items,
+    parse_forum_b_items,
+    parse_forum_a_items,
+    parse_link_gallery_items,
+    parse_rss_items,
+)
 from app.service import AggregateFeedService, FeedParser, FeedService, FeedServiceError
 
 
@@ -33,7 +40,7 @@ class FeedProvider(Protocol):
 
 
 def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser:
-    """根据索引页路径结构选择解析器，与站点域名解耦。
+    """根据来源配置选择解析器，图站显式配置优先于路径推断。
 
     参数：
         source: RSS 来源配置。
@@ -41,6 +48,16 @@ def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser
     返回值：
         绑定过滤开关的解析函数。
     """
+    if source.parser_kind == "rss":
+        return parse_rss_items
+    if source.parser_kind == "links":
+        return partial(
+            parse_link_gallery_items,
+            link_pattern=source.link_pattern,
+            link_selector=source.link_selector,
+            parent_selector=source.parent_selector,
+        )
+
     path = urlparse(source.source_url).path.rstrip("/")
     if path.endswith("index.php"):
         return parse_forum_b_home_items
@@ -104,14 +121,25 @@ def create_feed_services(settings: Settings) -> dict[str, FeedProvider]:
     providers["/rss/forum-b.xml"] = AggregateFeedService(
         settings=settings,
         feed_title="论坛 B - 板块一/板块二/板块三",
-        source_url=os.getenv(
-            "FORUM_B_INDEX_URL", FORUM_B_INDEX_URL
-        ),
+        source_url=os.getenv("FORUM_B_INDEX_URL", FORUM_B_INDEX_URL),
         public_feed_url=f"{public_base_url}/rss/forum-b.xml",
         children=[services[route] for route in forum_b_routes],
     )
     for route, feed_service in services.items():
         providers.setdefault(route, feed_service)
+
+    # 图站：独立订阅 + 合并聚合端点
+    gallery_routes = sorted(
+        route for route in services if route.startswith("/gallery/")
+    )
+    if gallery_routes:
+        providers["/gallery.xml"] = AggregateFeedService(
+            settings=settings,
+            feed_title="精选图站聚合",
+            source_url=public_base_url,
+            public_feed_url=f"{public_base_url}/gallery.xml",
+            children=[services[route] for route in gallery_routes],
+        )
     return providers
 
 
@@ -158,7 +186,7 @@ def create_app(
     settings: Settings | None = None,
     feed_services: dict[str, FeedProvider] | None = None,
 ) -> Flask:
-    """创建 Flask 应用并注册健康检查及全部 RSS 路由。
+    """创建 Flask 应用并注册健康检查、OPML 与全部 RSS 路由。
 
     参数：
         settings: 可选的测试配置；缺失时从环境读取。
@@ -170,6 +198,38 @@ def create_app(
     services = feed_services or create_feed_services(runtime_settings)
     app = Flask(__name__)
     app.extensions["feed_services"] = services
+
+    @app.get("/feeds.opml")
+    def feeds_opml() -> tuple[Response, int]:
+        """输出全部订阅的 OPML 列表，供阅读器一键导入。
+
+        参数：
+            无。
+        返回值：
+            OPML XML 响应。
+        """
+        entries: list[tuple[str, str]] = []
+        seen_urls: set[str] = set()
+        for feed_service in services.values():
+            source = getattr(feed_service, "source", None)
+            title = (
+                getattr(source, "feed_title", None)
+                or getattr(feed_service, "feed_title", None)
+                or "RSS Feed"
+            )
+            url = (
+                getattr(source, "public_feed_url", None)
+                or getattr(feed_service, "public_feed_url", "")
+            )
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            entries.append((title, url))
+
+        response = Response(
+            build_opml(entries), content_type="text/x-opml; charset=utf-8"
+        )
+        return response, 200
 
     @app.get("/healthz")
     def healthz() -> tuple[Response, int]:
@@ -204,7 +264,6 @@ def create_app(
         )
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response, 200
-
 
     for route, feed_service in services.items():
         endpoint = "feed_" + route.strip("/").replace("/", "_").replace(".", "_")

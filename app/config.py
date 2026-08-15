@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.models import FeedSource
@@ -20,6 +22,7 @@ FORUM_B_FEEDS = (
     ("forum-b-fid-21", "21", "板块二"),
     ("forum-b-fid-33", "33", "板块三"),
 )
+GALLERY_SOURCES_FILE = Path(__file__).resolve().parent.parent / "config" / "gallery_sources.json"
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class Settings:
     max_feed_items: int
     user_agent: str
     keep_image_posts_only: bool = True
+    gallery_sources: tuple[FeedSource, ...] = field(default_factory=tuple)
 
 
 def get_int_env(name: str, default_value: int) -> int:
@@ -117,13 +121,64 @@ def get_url_origin(url: str) -> str:
     return f"{parsed_url.scheme}://{parsed_url.netloc}"
 
 
+def load_gallery_sources(
+    public_base_url: str, path: Path | None = None
+) -> tuple[FeedSource, ...]:
+    """从 JSON 文件加载图站来源，文件缺失时返回空集合。
+
+    参数：
+        public_base_url: 对外公开基础地址。
+        path: 可选的来源配置文件路径。
+    返回值：
+        已生成独立路由的 FeedSource 元组。
+    """
+    source_file = path or Path(
+        os.getenv("GALLERY_SOURCES_FILE", str(GALLERY_SOURCES_FILE))
+    )
+    if not source_file.exists():
+        return ()
+
+    try:
+        payload = json.loads(source_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"图站来源配置无法读取: {error}") from error
+
+    sources = []
+    base_url = public_base_url.rstrip("/")
+    for entry in payload.get("sources", []):
+        key = str(entry.get("key", "")).strip()
+        title = str(entry.get("title", "")).strip()
+        url = str(entry.get("url", "")).strip()
+        parser_kind = str(entry.get("parser", "auto")).strip()
+        if not key or not title or not url:
+            raise ValueError("图站来源每项必须包含 key/title/url")
+        if parser_kind not in {"rss", "links"}:
+            raise ValueError(f"图站来源 {key} 的 parser 必须是 rss 或 links")
+
+        route = f"/gallery/{key}.xml"
+        sources.append(
+            FeedSource(
+                key=key,
+                source_url=url,
+                feed_title=title,
+                route=route,
+                public_feed_url=f"{base_url}{route}",
+                parser_kind=parser_kind,
+                link_pattern=str(entry.get("link_pattern", "")),
+                link_selector=str(entry.get("link_selector", "")),
+                parent_selector=str(entry.get("parent_selector", "")),
+            )
+        )
+    return tuple(sources)
+
+
 def get_feed_sources(settings: Settings) -> list[FeedSource]:
-    """构建论坛 A 与论坛 B 的三个板块的来源配置。
+    """构建论坛 A、论坛 B 与全部图站来源配置。
 
     参数：
         settings: 已校验的运行时配置。
     返回值：
-        论坛 A 与论坛 B 的三个板块的来源列表。
+        论坛 A、论坛 B 与图站来源列表。
     """
     public_base_url = settings.public_base_url.rstrip("/")
     sources = [
@@ -161,6 +216,7 @@ def get_feed_sources(settings: Settings) -> list[FeedSource]:
             public_feed_url=f"{public_base_url}/rss/forum-b-highlights.xml",
         )
     )
+    sources.extend(settings.gallery_sources)
     return sources
 
 
@@ -175,11 +231,14 @@ def get_settings() -> Settings:
     public_feed_url = os.getenv(
         "PUBLIC_FEED_URL", f"http://127.0.0.1:{DEFAULT_PORT}/rss.xml"
     )
+    public_base_url = os.getenv(
+        "PUBLIC_BASE_URL", get_url_origin(public_feed_url)
+    )
     settings = Settings(
         source_url=os.getenv("SOURCE_URL", DEFAULT_SOURCE_URL),
         feed_title=os.getenv("FEED_TITLE", "论坛 A 示例订阅"),
         public_feed_url=public_feed_url,
-        public_base_url=os.getenv("PUBLIC_BASE_URL", get_url_origin(public_feed_url)),
+        public_base_url=public_base_url,
         port=get_int_env("PORT", DEFAULT_PORT),
         cache_seconds=get_int_env("CACHE_SECONDS", 600),
         failure_retry_seconds=get_int_env("FAILURE_RETRY_SECONDS", 60),
@@ -192,5 +251,6 @@ def get_settings() -> Settings:
             "USER_AGENT", "ForumRSSBot/1.0 (+private feed reader)"
         ),
         keep_image_posts_only=get_bool_env("KEEP_IMAGE_POSTS_ONLY", True),
+        gallery_sources=load_gallery_sources(public_base_url),
     )
     return validate_settings(settings)

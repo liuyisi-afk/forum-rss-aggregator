@@ -235,14 +235,23 @@ class AggregateFeedService:
         )
 
     def get_feed(self) -> FeedResult:
-        """刷新所有子来源并生成合并 RSS。
+        """刷新所有子来源并生成合并 RSS，单源失败时跳过。
 
         参数：
             无。
         返回值：
             合并后的 FeedResult。
         """
-        child_results = [child.get_feed() for child in self.children]
+        child_results = []
+        for child in self.children:
+            try:
+                child_results.append(child.get_feed())
+            except FeedServiceError:
+                # 单个来源不可用时继续输出其余来源，避免聚合整体失效。
+                LOGGER.warning("Aggregate child skipped: %s", type(child).__name__)
+        if not child_results:
+            raise FeedServiceError("RSS 暂时不可用")
+
         seen_thread_ids: set[str] = set()
         merged_items: list[FeedItem] = []
         for result in child_results:

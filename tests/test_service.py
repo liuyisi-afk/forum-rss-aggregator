@@ -71,7 +71,7 @@ def test_failure_backoff_returns_stale_without_repeated_fetch() -> None:
 
     参数：
         无。
-    返回值：
+        返回值：
         无；断言失败时由 pytest 报错。
     """
     fetcher = FailingFetcher()
@@ -95,7 +95,7 @@ def test_initial_failure_uses_generic_error_during_backoff() -> None:
 
     参数：
         无。
-    返回值：
+        返回值：
         无；断言失败时由 pytest 报错。
     """
     fetcher = FailingFetcher()
@@ -138,15 +138,23 @@ class StubChildService:
         )
 
 
-def test_aggregate_feed_service_merges_deduplicates_and_sorts() -> None:
-    """验证聚合服务去重并按发布时间倒序、缺失时间置后。
+class FailingChildService:
+    """模拟无法生成 RSS 的子来源。"""
 
-    参数：
-        无。
-    返回值：
-        无；断言失败时由 pytest 报错。
-    """
-    settings = Settings(
+    def get_feed(self) -> FeedResult:
+        """始终抛出通用不可用错误。
+
+        参数：
+            无。
+        返回值：
+            无；始终抛出 FeedServiceError。
+        """
+        raise FeedServiceError("RSS 暂时不可用")
+
+
+def build_aggregate_settings() -> Settings:
+    """构造聚合测试配置。"""
+    return Settings(
         source_url="https://forum-a.example.com/thread0806.php?fid=16",
         feed_title="测试 RSS",
         public_feed_url="http://127.0.0.1:28888/rss.xml",
@@ -159,6 +167,17 @@ def test_aggregate_feed_service_merges_deduplicates_and_sorts() -> None:
         max_feed_items=100,
         user_agent="test-agent",
     )
+
+
+def test_aggregate_feed_service_merges_deduplicates_and_sorts() -> None:
+    """验证聚合服务去重并按发布时间倒序、缺失时间置后。
+
+    参数：
+        无。
+        返回值：
+        无；断言失败时由 pytest 报错。
+    """
+    settings = build_aggregate_settings()
     older = FeedItem(
         thread_id="a", title="旧", link="http://x/a", author=None,
         published_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -190,3 +209,39 @@ def test_aggregate_feed_service_merges_deduplicates_and_sorts() -> None:
 
     assert [item.thread_id for item in result.items] == ["b", "a", "c"]
     assert len(result.items) == 3
+
+
+def test_aggregate_feed_service_skips_failed_child() -> None:
+    """验证单个子来源失败时聚合仍返回其余来源。"""
+    settings = build_aggregate_settings()
+    item = FeedItem(
+        thread_id="ok", title="可用", link="http://x/ok", author=None,
+        published_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    aggregate = AggregateFeedService(
+        settings=settings,
+        feed_title="聚合",
+        source_url="https://forum-b.example.com/index.php",
+        public_feed_url="http://127.0.0.1:28888/rss/forum-b.xml",
+        children=[FailingChildService(), StubChildService([item])],
+    )
+
+    result = aggregate.get_feed()
+
+    assert [feed_item.thread_id for feed_item in result.items] == ["ok"]
+    assert result.is_stale is False
+
+
+def test_aggregate_feed_service_fails_when_all_children_fail() -> None:
+    """验证所有子来源都失败时聚合返回通用错误。"""
+    settings = build_aggregate_settings()
+    aggregate = AggregateFeedService(
+        settings=settings,
+        feed_title="聚合",
+        source_url="https://forum-b.example.com/index.php",
+        public_feed_url="http://127.0.0.1:28888/rss/forum-b.xml",
+        children=[FailingChildService()],
+    )
+
+    with pytest.raises(FeedServiceError, match="RSS 暂时不可用"):
+        aggregate.get_feed()

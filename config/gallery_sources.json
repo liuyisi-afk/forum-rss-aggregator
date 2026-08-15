@@ -1,0 +1,128 @@
+{
+  "sources": [
+    {
+      "key": "91shenshi",
+      "title": "91绅士 - 国模Cos写真",
+      "url": "https://www.91shenshi.com/rss.xml",
+      "parser": "rss"
+    },
+    {
+      "key": "footmm",
+      "title": "福妹 - 国模/亚模丝袜美腿",
+      "url": "https://www.footmm.net/feed.php",
+      "parser": "rss"
+    },
+    {
+      "key": "depvailon",
+      "title": "Depvailon - 中韩越模写真",
+      "url": "https://www.depvailon.com/rss.xml",
+      "parser": "rss"
+    },
+    {
+      "key": "xlust-pure",
+      "title": "XLUST Pure Media - 中韩极限擦边",
+      "url": "https://xlust.org/category/pure-media/feed/",
+      "parser": "rss"
+    },
+    {
+      "key": "baobua",
+      "title": "BaoBua - 亚模写真",
+      "url": "https://baobua.net/rss.xml",
+      "parser": "rss"
+    },
+    {
+      "key": "mitaku",
+      "title": "Mitaku - 亚模Cos",
+      "url": "https://mitaku.net/feed/",
+      "parser": "rss"
+    },
+    {
+      "key": "4kup",
+      "title": "4KUP - 亚模写真",
+      "url": "https://4kup.net/feed/",
+      "parser": "rss"
+    },
+    {
+      "key": "everia-chinese",
+      "title": "Everia China - 中日韩模特",
+      "url": "https://everia.club/category/chinese/feed/",
+      "parser": "rss"
+    },
+    {
+      "key": "1yis",
+      "title": "1Y Beauties - 国模写真",
+      "url": "https://www.1y.is/feed",
+      "parser": "rss"
+    },
+    {
+      "key": "16k",
+      "title": "16K 图库 - 亚模写真",
+      "url": "https://16k.club/feed.php",
+      "parser": "rss"
+    },
+    {
+      "key": "hitxhot",
+      "title": "Hit-x-Hot - 中日韩模特",
+      "url": "https://www.hitxhot.org/rss.xml",
+      "parser": "rss"
+    },
+    {
+      "key": "coserslove",
+      "title": "CosersLove - 国模Cos",
+      "url": "https://coserslove.com/",
+      "parser": "links",
+      "link_pattern": "^/album/"
+    },
+    {
+      "key": "galleryepic",
+      "title": "Gallery Epic - 国模Cos",
+      "url": "https://galleryepic.com/zh/cosplays/1",
+      "parser": "links",
+      "link_pattern": "^/zh/cosplay/\\d+$"
+    },
+    {
+      "key": "fuligirl",
+      "title": "福利姬美图 - 国模Cos",
+      "url": "https://fuligirl.top/",
+      "parser": "links",
+      "link_pattern": "(?:^|/)albums/\\d+$"
+    },
+    {
+      "key": "buondua",
+      "title": "Buon Dua - 中日韩模特",
+      "url": "https://buondua.com/",
+      "parser": "links",
+      "link_selector": "a.item-link"
+    },
+    {
+      "key": "ilovexs",
+      "title": "Nongmo.Zone - 中日韩写真",
+      "url": "https://www.ilovexs.com/",
+      "parser": "links",
+      "link_pattern": "/post_id/\\d+"
+    },
+    {
+      "key": "nudecosplaygirls",
+      "title": "NudeCosplayGirls - 亚模Cos",
+      "url": "https://nudecosplaygirls.com/hot/",
+      "parser": "links",
+      "link_pattern": "^/[a-z0-9][a-z0-9-]+/$",
+      "parent_selector": "h3.entry-title"
+    },
+    {
+      "key": "amazon-love",
+      "title": "Love Asian Babes - 中日韩写真",
+      "url": "https://amazon-love.com/",
+      "parser": "links",
+      "link_pattern": "^/[^/]+\\.html$",
+      "parent_selector": "h2.entry-title"
+    },
+    {
+      "key": "yazhouse8",
+      "title": "亚洲色吧 - 亚模套图",
+      "url": "https://yazhouse8.com/meinv/",
+      "parser": "links",
+      "link_pattern": "img-\\d+\\.html$"
+    }
+  ]
+}
