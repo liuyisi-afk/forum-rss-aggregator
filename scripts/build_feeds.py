@@ -1,10 +1,11 @@
 """生成全部 RSS 静态文件到 public/ 目录，供 CI 与 Pages 部署使用。
 
-用法：python scripts/build_feeds.py [输出目录]
+用法：python scripts/build_feeds.py [输出目录] [--only-gallery]
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -13,12 +14,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.feed import build_rss
+from app.config import load_gallery_sources
+from app.feed import build_opml, build_rss
 from app.fetcher import ForumFetcher
+from app.models import FeedItem
 from app.parser import (
     parse_forum_a_items,
     parse_forum_b_home_items,
     parse_forum_b_items,
+    parse_link_gallery_items,
+    parse_rss_items,
 )
 
 USER_AGENT = (
@@ -197,7 +202,7 @@ def write_feed(output_dir: Path, filename: str, title: str, source_url: str, ite
 
     参数：
         output_dir: 输出目录。
-        filename: 文件名（含 .xml）。
+        filename: 文件名（含 .xml，可含子目录）。
         title: RSS 标题。
         source_url: 频道链接。
         items: FeedItem 列表。
@@ -212,19 +217,132 @@ def write_feed(output_dir: Path, filename: str, title: str, source_url: str, ite
         f"{public_base_url}/{filename}",
         datetime.now(timezone.utc),
     )
-    (output_dir / filename).write_bytes(content)
+    target = output_dir / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
     print(f"wrote {filename}: {len(items)} items")
+
+
+def write_opml(output_dir: Path, entries: list[tuple[str, str]]) -> None:
+    """生成 OPML 订阅列表文件。
+
+    参数：
+        output_dir: 输出目录。
+        entries: (订阅标题, 订阅地址) 列表。
+    返回值：
+        无。
+    """
+    content = build_opml(entries)
+    target = output_dir / "feeds.opml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    print(f"wrote feeds.opml: {len(entries)} entries")
+
+
+def parse_gallery_source(source, html: str) -> list[FeedItem]:
+    """按来源配置解析图站首页或自带 RSS。
+
+    参数：
+        source: FeedSource 图站来源。
+        html: 抓取到的页面文本。
+    返回值：
+        FeedItem 列表。
+    """
+    if source.parser_kind == "rss":
+        return parse_rss_items(html, source.source_url, PAGE_SIZE)
+    return parse_link_gallery_items(
+        html,
+        source.source_url,
+        PAGE_SIZE,
+        link_pattern=source.link_pattern,
+        link_selector=source.link_selector,
+        parent_selector=source.parent_selector,
+    )
+
+
+def build_gallery_feeds(
+    fetcher: ForumFetcher, output_dir: Path, public_base_url: str
+) -> list:
+    """抓取并生成全部图站 RSS 与聚合文件。
+
+    参数：
+        fetcher: 限速下载器。
+        output_dir: 输出目录。
+        public_base_url: 对外基础地址。
+    返回值：
+        失败来源的 key 列表。
+    """
+    sources = load_gallery_sources(public_base_url)
+    failures = []
+    collected_items = []
+    for source in sources:
+        try:
+            html = fetch_with_retry(fetcher, source.source_url)
+            items = parse_gallery_source(source, html)
+            if not items:
+                raise RuntimeError("empty gallery list")
+            collected_items.extend(items)
+            write_feed(
+                output_dir,
+                f"gallery/{source.key}.xml",
+                source.feed_title,
+                source.source_url,
+                items,
+                public_base_url,
+            )
+        except Exception as error:
+            failures.append(f"{source.key}: {type(error).__name__}")
+
+    if collected_items:
+        merged = []
+        seen_guids = set()
+        for item in collected_items:
+            if item.thread_id not in seen_guids:
+                seen_guids.add(item.thread_id)
+                merged.append(item)
+        write_feed(
+            output_dir,
+            "gallery.xml",
+            "精选图站聚合",
+            public_base_url,
+            sort_by_published(merged),
+            public_base_url,
+        )
+    return failures
+
+
+def build_gallery_opml(output_dir: Path, public_base_url: str) -> None:
+    """生成图站静态 OPML 文件。
+
+    参数：
+        output_dir: 输出目录。
+        public_base_url: 对外基础地址。
+    返回值：
+        无。
+    """
+    gallery_sources = load_gallery_sources(public_base_url)
+    entries = [
+        (source.feed_title, f"{public_base_url}/gallery/{source.key}.xml")
+        for source in gallery_sources
+    ]
+    entries.append(("精选图站聚合", f"{public_base_url}/gallery.xml"))
+    write_opml(output_dir, entries)
 
 
 def main() -> None:
     """抓取全部来源并生成静态 RSS 文件。
 
     参数：
-        无（输出目录从命令行读取）。
+        无（输出目录与模式从命令行读取）。
     返回值：
         无。
     """
-    output_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "public")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output_dir", nargs="?", default="public")
+    parser.add_argument("--only-gallery", action="store_true")
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     source_url_a = os.getenv("SOURCE_URL", "https://forum-a.example.com/thread0806.php?fid=16")
@@ -248,6 +366,14 @@ def main() -> None:
         user_agent=USER_AGENT,
     )
     failures = []
+
+    if args.only_gallery:
+        failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+        build_gallery_opml(output_dir, public_base_url)
+        if failures:
+            print("FAILURES:", "; ".join(failures))
+            sys.exit(1)
+        return
 
     # 论坛 A 第一页带图帖
     try:
@@ -352,6 +478,10 @@ def main() -> None:
                 sort_by_published(digest_items),
                 public_base_url,
             )
+
+    # 精选图站 RSS
+    failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+    build_gallery_opml(output_dir, public_base_url)
 
     if failures:
         print("FAILURES:", "; ".join(failures))

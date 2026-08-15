@@ -1,4 +1,4 @@
-"""将帖子元数据转换为 RSS 2.0 XML。"""
+"""将帖子元数据转换为 RSS 2.0 与 OPML 文档。"""
 
 from __future__ import annotations
 
@@ -79,3 +79,28 @@ def build_rss(
 
     return ElementTree.tostring(rss, encoding="utf-8", xml_declaration=True)
 
+
+def build_opml(entries: list[tuple[str, str]]) -> bytes:
+    """构建 OPML 2.0 订阅列表，供阅读器一键导入。
+
+    参数：
+        entries: (订阅标题, 订阅地址) 列表。
+    返回值：
+        带 XML 声明的 UTF-8 字节串。
+    """
+    opml = ElementTree.Element("opml", {"version": "2.0"})
+    head = ElementTree.SubElement(opml, "head")
+    append_text_element(head, "title", "RSS Feeds")
+    body = ElementTree.SubElement(opml, "body")
+    for title, url in entries:
+        ElementTree.SubElement(
+            body,
+            "outline",
+            {
+                "text": title,
+                "title": title,
+                "type": "rss",
+                "xmlUrl": url,
+            },
+        )
+    return ElementTree.tostring(opml, encoding="utf-8", xml_declaration=True)

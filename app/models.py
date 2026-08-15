@@ -26,6 +26,10 @@ class FeedSource:
     feed_title: str
     route: str
     public_feed_url: str
+    parser_kind: str = "auto"
+    link_pattern: str = ""
+    link_selector: str = ""
+    parent_selector: str = ""
 
 
 @dataclass(frozen=True)

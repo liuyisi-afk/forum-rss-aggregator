@@ -7,6 +7,8 @@
 - **论坛 A**：解析帖子列表页，仅保留标题含图片/视频计数标记（如 `[36P]`、`[10+1V]`）的帖子。
 - **论坛 B**：解析 Discuz 风格列表页，仅保留带图片附件图标的帖子；支持多板块独立订阅与合并聚合。
 - **论坛 B 首页精选**：解析“最新精华 / 最新点赞 / 本周热门”三栏，跨栏按 thread id 去重。
+- **精选图站**：支持站点自带 RSS 直通和首页链接列表解析，覆盖国模/中日韩/亚模擦边与 cos 图站，生成独立与聚合订阅。
+- **OPML**：`/feeds.opml` 输出全部订阅，方便导入阅读器。
 
 ## 路由（本地运行示例）
 
@@ -18,12 +20,15 @@
 | `/rss/forum-b-fid-33.xml` | 论坛 B 板块三 |
 | `/rss/forum-b.xml` | 论坛 B 三个板块合并，按发布时间排序 |
 | `/rss/forum-b-highlights.xml` | 论坛 B 首页精选 |
+| `/gallery.xml` | 全部精选图站合并订阅 |
+| `/gallery/<key>.xml` | 单个图站订阅 |
+| `/feeds.opml` | 全部订阅的 OPML 列表 |
 | `/healthz` | 健康检查 |
 
 部署后把 `PUBLIC_FEED_URL` / `PUBLIC_BASE_URL` 指向你的对外地址，例如：
 
 - `https://rss.example.com/rss.xml`
-- `https://rss.example.com/rss/forum-b.xml`
+- `https://rss.example.com/gallery.xml`
 
 ## 纯文本过滤
 
@@ -37,6 +42,7 @@
 ## 架构
 
 - 应用（Flask + Gunicorn）监听 `127.0.0.1:28888`，按主机级 10 秒限速抓取索引页。
+- 图站来源配置在 `config/gallery_sources.json`，`rss` 表示直接转发站点自带 RSS，`links` 表示解析首页图集链接。
 - nginx 反向代理到本地应用，80 端口 301 跳转 HTTPS，443 使用源站证书。
 - 可选前置 CDN（如 Cloudflare）：源站证书可由 CDN 的 Origin CA 接口签发，Zone SSL 使用 Full (strict)。
 
@@ -50,6 +56,13 @@ python -m venv .venv
 ```
 
 访问 `http://127.0.0.1:28888/healthz` 验证。
+
+只生成图站静态订阅：
+
+```powershell
+$env:PUBLIC_BASE_URL='https://rss.example.com'
+.\.venv\Scripts\python.exe scripts\build_feeds.py public --only-gallery
+```
 
 ## 配置
 
@@ -69,6 +82,7 @@ python -m venv .venv
 | `MAX_FEED_ITEMS` | 每个订阅最多条目数 |
 | `USER_AGENT` | 请求 User-Agent |
 | `KEEP_IMAGE_POSTS_ONLY` | `1` 只保留带图帖子，`0` 保留全部 |
+| `GALLERY_SOURCES_FILE` | 可选：图站来源 JSON 文件路径 |
 
 ## 部署
 
@@ -90,7 +104,7 @@ bash deploy/install-nginx.sh
 
 ## 安全说明
 
-- 仓库不含任何凭据；所有 URL 均为示例占位符，部署时通过 `/etc/rss-feed.env` 注入。
+- 仓库不含任何凭据；部署时通过 `/etc/rss-feed.env` 注入。
 - 不在仓库、日志或文档中保存密码、API Token 或证书私钥。
 - RSS 只输出标题、链接、作者、发布时间和 thread id（纯文本元数据）。
 - 不绕过登录、验证码、反爬或访问限制。
