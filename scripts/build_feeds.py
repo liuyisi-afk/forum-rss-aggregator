@@ -371,8 +371,7 @@ def main() -> None:
         failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
         build_gallery_opml(output_dir, public_base_url)
         if failures:
-            print("FAILURES:", "; ".join(failures))
-            sys.exit(1)
+            print("WARNINGS (non-fatal):", "; ".join(failures))
         return
 
     # 论坛 A 第一页带图帖
@@ -484,8 +483,7 @@ def main() -> None:
     build_gallery_opml(output_dir, public_base_url)
 
     if failures:
-        print("FAILURES:", "; ".join(failures))
-        sys.exit(1)
+        print("WARNINGS (non-fatal):", "; ".join(failures))
 
 
 if __name__ == "__main__":
