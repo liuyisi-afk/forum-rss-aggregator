@@ -1,6 +1,7 @@
 """生成全部 RSS 静态文件到 public/ 目录，供 CI 与 Pages 部署使用。
 
-用法：python scripts/build_feeds.py [输出目录] [--only-gallery]
+用法：
+  python scripts/build_feeds.py [输出目录] [--only-forum] [--only-gallery]
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -260,13 +262,48 @@ def parse_gallery_source(source, html: str) -> list[FeedItem]:
     )
 
 
+GALLERY_WORKERS = 8
+
+
+def fetch_single_gallery(
+    source, fetcher: ForumFetcher, output_dir: Path, public_base_url: str
+):
+    """抓取并写入单个图站 feed，返回 (source, items, error)。
+
+    参数：
+        source: FeedSource 图站来源。
+        fetcher: 下载器。
+        output_dir: 输出目录。
+        public_base_url: 对外基础地址。
+    返回值：
+        (source, items, error) 三元组，成功时 error 为 None。
+    """
+    try:
+        html = fetch_with_retry(fetcher, source.source_url)
+        items = parse_gallery_source(source, html)
+        if not items:
+            raise RuntimeError("empty gallery list")
+        write_feed(
+            output_dir,
+            f"gallery/{source.key}.xml",
+            source.feed_title,
+            source.source_url,
+            items,
+            public_base_url,
+        )
+        return (source, items, None)
+    except Exception as error:
+        return (source, [], f"{source.key}: {type(error).__name__}")
+
+
 def build_gallery_feeds(
     fetcher: ForumFetcher, output_dir: Path, public_base_url: str
 ) -> list:
-    """抓取并生成全部图站 RSS 与聚合文件。
+    """并行抓取全部图站并生成独立 feed 与聚合文件。
 
+    图站间无共享限速需求，使用线程池并行抓取以加速构建。
     参数：
-        fetcher: 限速下载器。
+        fetcher: 下载器（图站模式各线程独立请求）。
         output_dir: 输出目录。
         public_base_url: 对外基础地址。
     返回值：
@@ -275,23 +312,20 @@ def build_gallery_feeds(
     sources = load_gallery_sources(public_base_url)
     failures = []
     collected_items = []
-    for source in sources:
-        try:
-            html = fetch_with_retry(fetcher, source.source_url)
-            items = parse_gallery_source(source, html)
-            if not items:
-                raise RuntimeError("empty gallery list")
-            collected_items.extend(items)
-            write_feed(
-                output_dir,
-                f"gallery/{source.key}.xml",
-                source.feed_title,
-                source.source_url,
-                items,
-                public_base_url,
-            )
-        except Exception as error:
-            failures.append(f"{source.key}: {type(error).__name__}")
+
+    with ThreadPoolExecutor(max_workers=GALLERY_WORKERS) as pool:
+        futures = {
+            pool.submit(
+                fetch_single_gallery, source, fetcher, output_dir, public_base_url
+            ): source
+            for source in sources
+        }
+        for future in as_completed(futures):
+            source, items, error = future.result()
+            if error:
+                failures.append(error)
+            else:
+                collected_items.extend(items)
 
     if collected_items:
         merged = []
@@ -329,26 +363,21 @@ def build_gallery_opml(output_dir: Path, public_base_url: str) -> None:
     write_opml(output_dir, entries)
 
 
-def main() -> None:
-    """抓取全部来源并生成静态 RSS 文件。
+def build_forum_feeds(
+    fetcher: ForumFetcher, output_dir: Path, public_base_url: str
+) -> list:
+    """Fetch forum A and B feeds, write to output dir.
 
-    参数：
-        无（输出目录与模式从命令行读取）。
-    返回值：
-        无。
+    Args:
+        fetcher: Rate-limited fetcher.
+        output_dir: Output directory.
+        public_base_url: Public base URL.
+    Returns:
+        List of failed source keys.
     """
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("output_dir", nargs="?", default="public")
-    parser.add_argument("--only-gallery", action="store_true")
-    args = parser.parse_args()
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     source_url_a = os.getenv("SOURCE_URL", "https://forum-a.example.com/thread0806.php?fid=16")
     forum_b_base = os.getenv("FORUM_B_BASE_URL", "https://forum-b.example.com").rstrip("/")
     forum_b_index = os.getenv("FORUM_B_INDEX_URL", "https://forum-b.example.com/index.php")
-    public_base_url = os.getenv("PUBLIC_BASE_URL", "https://rss.example.com").rstrip("/")
     feed_title_a = os.getenv("FEED_TITLE_A", "论坛 A 示例订阅")
     feed_title_b = os.getenv("FEED_TITLE_B", "论坛 B")
     section_names = get_section_names()
@@ -359,20 +388,7 @@ def main() -> None:
         "SNAPSHOT_BASE_URL",
         "https://forum-a.example.com/thread0806.php?fid=16&search=digest&page={page}",
     )
-
-    fetcher = ForumFetcher(
-        min_interval_seconds=10,
-        timeout_seconds=20,
-        user_agent=USER_AGENT,
-    )
     failures = []
-
-    if args.only_gallery:
-        failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
-        build_gallery_opml(output_dir, public_base_url)
-        if failures:
-            print("WARNINGS (non-fatal):", "; ".join(failures))
-        return
 
     # 论坛 A 第一页带图帖
     try:
@@ -478,7 +494,47 @@ def main() -> None:
                 public_base_url,
             )
 
-    # 精选图站 RSS
+    return failures
+
+
+def main() -> None:
+    """抓取全部来源并生成静态 RSS 文件。
+
+    参数：
+        无（输出目录与模式从命令行读取）。
+    返回值：
+        无。
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output_dir", nargs="?", default="public")
+    parser.add_argument("--only-forum", action="store_true")
+    parser.add_argument("--only-gallery", action="store_true")
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "https://rss.example.com").rstrip("/")
+
+    fetcher = ForumFetcher(
+        min_interval_seconds=10,
+        timeout_seconds=20,
+        user_agent=USER_AGENT,
+    )
+    failures = []
+
+    if args.only_gallery:
+        failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+        build_gallery_opml(output_dir, public_base_url)
+        if failures:
+            print("WARNINGS (non-fatal):", "; ".join(failures))
+        return
+
+    if args.only_forum:
+        build_forum_feeds(fetcher, output_dir, public_base_url)
+        return
+
+    build_forum_feeds(fetcher, output_dir, public_base_url)
     failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
     build_gallery_opml(output_dir, public_base_url)
 

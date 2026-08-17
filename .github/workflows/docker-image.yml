@@ -12,7 +12,6 @@ permissions:
   contents: write
 
 env:
-  # real values are injected from repo secrets (not visible in public repo)
   SOURCE_URL: ${{ secrets.SOURCE_URL }}
   FORUM_B_BASE_URL: ${{ secrets.FORUM_B_BASE_URL }}
   FORUM_B_INDEX_URL: ${{ secrets.FORUM_B_INDEX_URL }}
@@ -26,7 +25,7 @@ env:
   CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
 
 jobs:
-  build-and-deploy:
+  build-forum:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,10 +39,58 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Generate RSS feeds
+      - name: Build forum feeds (91 + caoliu)
         env:
           BUILD_DIGEST_B: ${{ github.event.schedule == '0 5 * * *' && '1' || '0' }}
-        run: python scripts/build_feeds.py public
+        run: python scripts/build_feeds.py public --only-forum
+
+      - name: Upload forum artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: forum-feeds
+          path: public/
+
+  build-gallery:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build gallery feeds (parallel)
+        run: python scripts/build_feeds.py public --only-gallery
+
+      - name: Upload gallery artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-feeds
+          path: public/
+
+  merge-deploy:
+    needs: [build-forum, build-gallery]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download forum feeds
+        uses: actions/download-artifact@v4
+        with:
+          name: forum-feeds
+          path: public/
+
+      - name: Download gallery feeds
+        uses: actions/download-artifact@v4
+        with:
+          name: gallery-feeds
+          path: public/
 
       - name: Commit feeds back to repo
         run: |
