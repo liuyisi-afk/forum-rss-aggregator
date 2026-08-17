@@ -2,10 +2,12 @@ name: Build feeds and deploy to Pages
 
 on:
   schedule:
-    # every 30 minutes
+    # every 30 minutes: fetch + commit, no CF deploy
     - cron: "0,30 * * * *"
     # daily at 05:00 UTC: full digest archive for forum B
     - cron: "0 5 * * *"
+    # every 12 hours: deploy to Cloudflare Pages
+    - cron: "0 0,12 * * *"
   workflow_dispatch:
 
 permissions:
@@ -92,15 +94,18 @@ jobs:
           name: gallery-feeds
           path: public/
 
-      - name: Commit and deploy (only when feeds changed)
+      - name: Commit feeds back to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add public
           if git diff --cached --quiet; then
-            echo "no feed changes - skipping commit and deploy"
+            echo "no feed changes"
           else
             git commit -m "chore: refresh RSS feeds [skip ci]"
             git push
-            npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
           fi
+
+      - name: Deploy to Cloudflare Pages (every 12h only)
+        if: github.event.schedule == '0 0,12 * * *' || github.event_name == 'workflow_dispatch'
+        run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
