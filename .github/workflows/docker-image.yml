@@ -92,17 +92,15 @@ jobs:
           name: gallery-feeds
           path: public/
 
-      - name: Commit feeds back to repo
+      - name: Commit and deploy (only when feeds changed)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add public
           if git diff --cached --quiet; then
-            echo "no feed changes"
+            echo "no feed changes - skipping commit and deploy"
           else
             git commit -m "chore: refresh RSS feeds [skip ci]"
             git push
+            npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
           fi
-
-      - name: Deploy to Cloudflare Pages
-        run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
