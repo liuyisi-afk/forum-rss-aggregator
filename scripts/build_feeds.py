@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -35,6 +36,11 @@ PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 200
 EMPTY_PAGE_LIMIT = 2
 FIDS_B = ("19", "21", "33")
+
+# 关键源不受其他源失败/限速影响：单独限速器 + 优先抓取 + 更多重试
+CRITICAL_GALLERY_KEYS = {"mzt", "91tutu", "91shenshi"}
+CRITICAL_RETRIES = 5
+DEFAULT_RETRIES = 3
 
 
 def fetch_with_retry(fetcher: ForumFetcher, url: str, retries: int = 3) -> str:
@@ -263,24 +269,49 @@ def parse_gallery_source(source, html: str) -> list[FeedItem]:
     )
 
 
+def _get_fetcher_for_url(
+    fetchers_by_host: dict[str, ForumFetcher], url: str
+) -> ForumFetcher:
+    """按 host 复用限速器，关键源与其他源互不阻塞。"""
+    host = urlsplit(url).netloc.lower()
+    fetcher = fetchers_by_host.get(host)
+    if fetcher is None:
+        fetcher = ForumFetcher(
+            min_interval_seconds=10,
+            timeout_seconds=20,
+            user_agent=USER_AGENT,
+        )
+        fetchers_by_host[host] = fetcher
+    return fetcher
+
+
 def build_gallery_feeds(
     fetcher: ForumFetcher, output_dir: Path, public_base_url: str
 ) -> list:
     """抓取并生成全部图站 RSS 与聚合文件。
 
     参数：
-        fetcher: 限速下载器。
+        fetcher: 兼容旧签名的默认限速器（实际按 host 隔离，关键源优先）。
         output_dir: 输出目录。
         public_base_url: 对外基础地址。
     返回值：
         失败来源的 key 列表。
     """
     sources = load_gallery_sources(public_base_url)
+    # 关键源优先，避免被前面失败/重试拖慢；其余按原顺序
+    sources = sorted(sources, key=lambda s: (0 if s.key in CRITICAL_GALLERY_KEYS else 1))
+    # 按 host 隔离限速器：91/mzt 等关键源不会被其他 host 的 10s 限速或重试阻塞
+    # 传入的 fetcher 仅为兼容旧签名保留，实际使用 per-host 实例
+    _ = fetcher  # 兼容未使用警告
+    fetchers_by_host: dict[str, ForumFetcher] = {}
     failures = []
     collected_items = []
     for source in sources:
+        is_critical = source.key in CRITICAL_GALLERY_KEYS
+        host_fetcher = _get_fetcher_for_url(fetchers_by_host, source.source_url)
+        retries = CRITICAL_RETRIES if is_critical else DEFAULT_RETRIES
         try:
-            html = fetch_with_retry(fetcher, source.source_url)
+            html = fetch_with_retry(host_fetcher, source.source_url, retries=retries)
             items = parse_gallery_source(source, html)
             if not items:
                 raise RuntimeError("empty gallery list")
@@ -363,24 +394,27 @@ def main() -> None:
         "https://forum-a.example.com/thread0806.php?fid=16&search=digest&page={page}",
     )
 
-    fetcher = ForumFetcher(
-        min_interval_seconds=10,
-        timeout_seconds=20,
-        user_agent=USER_AGENT,
-    )
-    failures = []
+    # 按 host 隔离限速器：草榴/91 等关键源与其他源互不阻塞、互不因重试互相拖慢
+    fetchers_by_host: dict[str, ForumFetcher] = {}
+
+    def get_fetcher(url: str) -> ForumFetcher:
+        return _get_fetcher_for_url(fetchers_by_host, url)
+
+    # 兼容旧签名：build_gallery_feeds 仍需一个 fetcher，传入草榴（关键源）对应的 per-host 实例
+    fallback_fetcher = get_fetcher(source_url_a)
+    failures: list[str] = []
 
     if args.only_gallery:
-        failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+        failures.extend(build_gallery_feeds(fallback_fetcher, output_dir, public_base_url))
         build_gallery_opml(output_dir, public_base_url)
         if failures:
             print("WARNINGS (non-fatal):", "; ".join(failures))
         return
 
-    # 论坛 A 第一页带图帖
+    # 论坛 A 第一页带图帖（草榴关键源，独立 host 限速，不受其他源失败影响）
     try:
         items_a = fetch_items(
-            fetcher, source_url_a, parse_forum_a_items, keep_images=True
+            get_fetcher(source_url_a), source_url_a, parse_forum_a_items, keep_images=True
         )
         write_feed(
             output_dir, "rss.xml", feed_title_a, source_url_a, items_a, public_base_url
@@ -388,9 +422,9 @@ def main() -> None:
     except Exception as error:
         failures.append(f"forum-a: {type(error).__name__}")
 
-    # 论坛 A 精华全量
+    # 论坛 A 精华全量（草榴 digest，独立重试，不阻塞后续关键源）
     try:
-        items_digest = fetch_digest_items(fetcher, digest_base_url)
+        items_digest = fetch_digest_items(get_fetcher(digest_base_url), digest_base_url)
         write_feed(
             output_dir,
             "caoliu-digest.xml",
@@ -408,7 +442,7 @@ def main() -> None:
         try:
             url = f"{forum_b_base}/forumdisplay.php?fid={fid}"
             items = fetch_b_section_items(
-                fetcher, forum_b_base, fid, b_page_limit
+                get_fetcher(url), forum_b_base, fid, b_page_limit
             )
             section_items[fid] = items
             write_feed(
@@ -424,7 +458,7 @@ def main() -> None:
 
     # 论坛 B 首页精选（解析器无图片过滤参数，单独调用）
     try:
-        home_html = fetch_with_retry(fetcher, forum_b_index)
+        home_html = fetch_with_retry(get_fetcher(forum_b_index), forum_b_index)
         items_home = parse_forum_b_home_items(home_html, forum_b_index, PAGE_SIZE)
         write_feed(
             output_dir,
@@ -462,7 +496,10 @@ def main() -> None:
         for fid in section_names:
             try:
                 items = fetch_b_digest_items(
-                    fetcher, forum_b_base, fid, digest_page_limit
+                    get_fetcher(f"{forum_b_base}/forumdisplay.php?fid={fid}&filter=digest"),
+                    forum_b_base,
+                    fid,
+                    digest_page_limit,
                 )
                 for item in items:
                     if item.thread_id not in digest_seen:
@@ -481,8 +518,8 @@ def main() -> None:
                 public_base_url,
             )
 
-    # 精选图站 RSS
-    failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+    # 精选图站 RSS（内部已按 host 隔离 + 关键源优先，91/草榴不受其他源失败影响）
+    failures.extend(build_gallery_feeds(fallback_fetcher, output_dir, public_base_url))
     build_gallery_opml(output_dir, public_base_url)
 
     if failures:

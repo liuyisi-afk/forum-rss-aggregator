@@ -1,6 +1,18 @@
 {
   "sources": [
     {
+      "key": "mzt",
+      "title": "妹子图 - 综合",
+      "url": "https://mzt.111404.xyz/urls?page=1&pageSize=50",
+      "parser": "mzt"
+    },
+    {
+      "key": "91tutu",
+      "title": "91图图 - 写真福利",
+      "url": "https://91tutu.cc/rss.xml",
+      "parser": "rss"
+    },
+    {
       "key": "91shenshi",
       "title": "91绅士 - 国模Cos写真",
       "url": "https://www.91shenshi.com/rss.xml",
@@ -123,18 +135,6 @@
       "url": "https://yazhouse8.com/meinv/",
       "parser": "links",
       "link_pattern": "img-\\d+\\.html$"
-    },
-    {
-      "key": "mzt",
-      "title": "妹子图 - 综合",
-      "url": "https://mzt.111404.xyz/urls?page=1&pageSize=50",
-      "parser": "mzt"
-    },
-    {
-      "key": "91tutu",
-      "title": "91图图 - 写真福利",
-      "url": "https://91tutu.cc/rss.xml",
-      "parser": "rss"
     }
   ]
 }
