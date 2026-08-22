@@ -7,9 +7,20 @@ on:
     # daily at 05:00 UTC: full digest archive for forum B
     - cron: "0 5 * * *"
   workflow_dispatch:
+    inputs:
+      build_digest:
+        description: "Force BUILD_DIGEST_B (1=full archive, 0=skip)"
+        required: false
+        default: "0"
 
 permissions:
   contents: write
+
+# 避免 05:00 全量归档（50 分钟）与半点增量任务并发导致 git push rejected
+# concurrency 会让后触发的任务排队，等前一个完成后再开始（不会直接失败）
+concurrency:
+  group: rss-feeds-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # real values are injected from repo secrets (not visible in public repo)
@@ -28,22 +39,36 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Generate RSS feeds
-        env:
-          BUILD_DIGEST_B: ${{ github.event.schedule == '0 5 * * *' && '1' || '0' }}
-        run: python scripts/build_feeds.py public
+        run: |
+          # 05:00 UTC 的全量归档不要依赖 github.event.schedule 比较（该字段在双 cron 时不可靠）
+          # 直接按 UTC 小时判断；workflow_dispatch 可通过 input 强制指定
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.build_digest }}" ]; then
+            export BUILD_DIGEST_B="${{ inputs.build_digest }}"
+          elif [ "$(date -u +%H)" = "05" ]; then
+            export BUILD_DIGEST_B=1
+          else
+            export BUILD_DIGEST_B=0
+          fi
+          echo "BUILD_DIGEST_B=$BUILD_DIGEST_B"
+          python scripts/build_feeds.py public
 
       - name: Commit feeds back to repo
         run: |
@@ -52,10 +77,39 @@ jobs:
           git add public
           if git diff --cached --quiet; then
             echo "no feed changes"
-          else
-            git commit -m "chore: refresh RSS feeds [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "chore: refresh RSS feeds [skip ci]"
+          # 并发重试：先直接 push，失败则 pull --rebase 后重试，最多 3 次
+          for i in 1 2 3; do
+            if git push; then
+              echo "push succeeded on attempt $i"
+              exit 0
+            fi
+            echo "push failed (attempt $i), rebasing..."
+            git fetch origin master
+            if ! git pull --rebase --autostash origin master; then
+              echo "rebase conflict, abort and reset"
+              git rebase --abort || true
+              git reset --hard origin/master
+              # 重新应用我们的 public 变更（如果还有差异）
+              # 已在上游已有相同或更新的 feeds 时，直接退出视为成功
+              if git diff --quiet && git diff --cached --quiet; then
+                echo "no local changes after reset, treating as success"
+                exit 0
+              fi
+              # 尝试重新提交（幂等）
+              git add public
+              if git diff --cached --quiet; then
+                echo "no changes to recommit"
+                exit 0
+              fi
+              git commit -m "chore: refresh RSS feeds [skip ci]" || true
+            fi
+            sleep $((i*5))
+          done
+          echo "push failed after retries"
+          exit 1
 
       - name: Deploy to Cloudflare Pages
         run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main
