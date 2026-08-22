@@ -23,6 +23,7 @@ from app.parser import (
     parse_forum_b_home_items,
     parse_forum_b_items,
     parse_link_gallery_items,
+    parse_mzt_api_items,
     parse_rss_items,
 )
 
@@ -250,6 +251,8 @@ def parse_gallery_source(source, html: str) -> list[FeedItem]:
     """
     if source.parser_kind == "rss":
         return parse_rss_items(html, source.source_url, PAGE_SIZE)
+    if source.parser_kind == "mzt":
+        return parse_mzt_api_items(html, source.source_url, PAGE_SIZE)
     return parse_link_gallery_items(
         html,
         source.source_url,

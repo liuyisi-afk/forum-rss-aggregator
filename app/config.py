@@ -152,8 +152,8 @@ def load_gallery_sources(
         parser_kind = str(entry.get("parser", "auto")).strip()
         if not key or not title or not url:
             raise ValueError("图站来源每项必须包含 key/title/url")
-        if parser_kind not in {"rss", "links"}:
-            raise ValueError(f"图站来源 {key} 的 parser 必须是 rss 或 links")
+        if parser_kind not in {"rss", "links", "mzt"}:
+            raise ValueError(f"图站来源 {key} 的 parser 必须是 rss 或 links 或 mzt")
 
         route = f"/gallery/{key}.xml"
         sources.append(
