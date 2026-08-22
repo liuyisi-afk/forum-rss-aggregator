@@ -20,6 +20,7 @@ from app.parser import (
     parse_forum_b_items,
     parse_forum_a_items,
     parse_link_gallery_items,
+    parse_mzt_api_items,
     parse_rss_items,
 )
 from app.service import AggregateFeedService, FeedParser, FeedService, FeedServiceError
@@ -50,6 +51,8 @@ def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser
     """
     if source.parser_kind == "rss":
         return parse_rss_items
+    if source.parser_kind == "mzt":
+        return parse_mzt_api_items
     if source.parser_kind == "links":
         return partial(
             parse_link_gallery_items,

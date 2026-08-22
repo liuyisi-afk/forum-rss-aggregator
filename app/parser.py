@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
+import json
+
 from bs4 import BeautifulSoup, Tag
 
 from app.models import FeedItem
@@ -539,6 +541,68 @@ def has_parent_selector(anchor: Tag, selector: str) -> bool:
             return True
         parent = parent.parent
     return False
+
+
+def parse_mzt_api_items(
+    html: str,
+    base_url: str,
+    max_items: int,
+    keep_image_posts_only: bool = False,  # noqa: ARG001
+) -> list[FeedItem]:
+    """解析妹子图（mzt.111404.xyz）JSON API `/urls` 列表。
+
+    参数：
+        html: `/urls?page=1&pageSize=xx` 返回的 JSON 文本（非 HTML）。
+        base_url: 请求 URL，用于推导站点 origin（如 https://mzt.111404.xyz/urls?...）。
+        max_items: 最多保留条目数。
+        keep_image_posts_only: 兼容签名，未使用。
+    返回值：
+        按接口顺序排列并去重的图集列表；JSON 无法解析时返回空列表。
+    """
+    if not html.strip() or max_items <= 0:
+        return []
+    try:
+        payload = json.loads(html)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return []
+    # 从 base_url 推导站点 origin，用于拼接详情页链接 /view/{id}
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://mzt.111404.xyz"
+    items: list[FeedItem] = []
+    seen_ids: set[str] = set()
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        iid = str(entry.get("id", "")).strip()
+        title = str(entry.get("title", "")).strip()
+        if not iid or not title or iid in seen_ids:
+            continue
+        # 1970-01-01 为上游未设置时间的占位，需视为无时间
+        raw_date = str(entry.get("created_at") or entry.get("updated_at") or "").strip()
+        published = parse_feed_date(raw_date)
+        if published is not None and published.year == 1970:
+            published = None
+        # 若 parse_feed_date 未能解析，尝试 gallery 日期兜底（兼容旧格式）
+        if published is None and raw_date:
+            # parse_feed_date 已处理 ISO8601，此处仅保留 None
+            pass
+        link = urljoin(origin + "/", f"view/{iid}")
+        seen_ids.add(iid)
+        items.append(
+            FeedItem(
+                thread_id=f"mzt:{iid}",
+                title=title,
+                link=link,
+                author=None,
+                published_at=published,
+            )
+        )
+        if len(items) >= max_items:
+            break
+    return items
 
 
 def parse_link_gallery_items(
