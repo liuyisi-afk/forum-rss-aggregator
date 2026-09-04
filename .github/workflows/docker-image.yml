@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   SOURCE_URL: ${{ secrets.SOURCE_URL }}
@@ -50,7 +50,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: forum-feeds
-          path: public/
+          # 仅上传论坛构建产物，避免在 merge-deploy 中覆盖图站文件。
+          path: |
+            public/rss.xml
+            public/caoliu-digest.xml
+            public/forum-b*.xml
+          if-no-files-found: error
 
   build-gallery:
     runs-on: ubuntu-latest
@@ -73,11 +78,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gallery-feeds
-          path: public/
+          # 仅上传图站构建产物，避免把论坛 job 的新文件覆盖为旧 checkout 文件。
+          path: |
+            public/gallery.xml
+            public/gallery/
+            public/feeds.opml
+          if-no-files-found: error
 
   merge-deploy:
     needs: [build-forum, build-gallery]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4

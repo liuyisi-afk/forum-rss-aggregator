@@ -78,7 +78,7 @@ def main() -> None:
     返回值：
         无。
     """
-    output = sys.argv[1] if len(sys.argv) > 1 else "/opt/rss-feed/var/caoliu-digest.xml"
+    output = sys.argv[1] if len(sys.argv) > 1 else "/var/rss-feed/caoliu-digest.xml"
     max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MAX_PAGES
 
     fetcher = ForumFetcher(
