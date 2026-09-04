@@ -38,3 +38,27 @@ def test_build_rss_outputs_valid_metadata_only_feed() -> None:
     assert root.findtext("./channel/item/guid") == "123"
     assert root.find("./channel/item/description") is None
 
+
+def test_build_rss_removes_xml_invalid_characters() -> None:
+    """验证任意来源的元数据都不会生成不可解析的 XML。"""
+    item = FeedItem(
+        thread_id="id\u0000-one",
+        title="安全\u0000标题\ud800",
+        link="https://example.com/item",
+        author="作\u0001者",
+        published_at=None,
+    )
+
+    content = build_rss(
+        [item],
+        "订\u0002阅",
+        "https://example.com/",
+        "https://rss.example.com/rss.xml",
+    )
+    root = ElementTree.fromstring(content)
+
+    assert root.findtext("./channel/title") == "订阅"
+    assert root.findtext("./channel/item/title") == "安全标题"
+    assert root.findtext("./channel/item/guid") == "id-one"
+    assert root.findtext("./channel/item/{http://purl.org/dc/elements/1.1/}creator") == "作者"
+

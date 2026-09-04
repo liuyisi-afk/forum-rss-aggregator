@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import email.utils
+import json
 import re
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
-import json
-
 from bs4 import BeautifulSoup, Tag
 
+from app.feed import strip_invalid_xml_chars
 from app.models import FeedItem
 
 
@@ -32,6 +32,53 @@ FORUM_B_ATTACH_ICON_SELECTOR = "img.attach[src*='attachicons']"
 SITE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 # 图站列表页常见的日期文本，如 2026-08-13 或 Published 2026-08-13
 GALLERY_DATE_PATTERN = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+ALLOWED_LINK_SCHEMES = frozenset({"http", "https"})
+MAX_XML_INPUT_CHARS = 5_000_000
+FORUM_B_TID_PATTERN = re.compile(r"^\d+$")
+MZT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def normalize_http_link(raw_link: str, base_url: str) -> str | None:
+    """补全并校验一个帖子链接，仅允许无凭据的 HTTP(S) 地址。
+
+    参数：
+        raw_link: 页面中提取的原始 href。
+        base_url: 用于补全相对地址的来源 URL。
+    返回值：
+        规范化绝对 URL；链接无效时返回 None。
+    """
+    if not isinstance(raw_link, str) or not raw_link.strip():
+        return None
+    candidate = raw_link.strip()
+    if any(character.isspace() or ord(character) < 0x20 for character in candidate):
+        return None
+    try:
+        link = urljoin(base_url, candidate)
+        parsed_link = urlparse(link)
+        hostname = parsed_link.hostname
+        parsed_link.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed_link.scheme.lower() not in ALLOWED_LINK_SCHEMES
+        or not parsed_link.netloc
+        or hostname is None
+        or parsed_link.username is not None
+        or parsed_link.password is not None
+    ):
+        return None
+    return link
+
+
+def is_valid_max_items(value: object) -> bool:
+    """判断条目数量上限是否为可安全使用的正整数。
+
+    参数：
+        value: 调用方提供的条目数量上限。
+    返回值：
+        值为非布尔正整数时返回 True。
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def parse_timestamp(timestamp_element: Tag | None) -> datetime | None:
@@ -73,7 +120,10 @@ def get_expected_fid(base_url: str) -> str | None:
     返回值：
         分区编号；缺失时返回 None。
     """
-    values = parse_qs(urlparse(base_url).query).get("fid", [])
+    try:
+        values = parse_qs(urlparse(base_url).query).get("fid", [])
+    except (TypeError, ValueError):
+        return None
     return values[0] if values else None
 
 
@@ -89,7 +139,10 @@ def is_expected_forum_link(href: str, expected_fid: str | None) -> bool:
     if expected_fid is None:
         return True
 
-    path_parts = [part for part in urlparse(href).path.split("/") if part]
+    try:
+        path_parts = [part for part in urlparse(href).path.split("/") if part]
+    except (TypeError, ValueError):
+        return False
     return (
         len(path_parts) >= 4
         and path_parts[0] == "htm_data"
@@ -114,9 +167,10 @@ def parse_row(row: Tag, base_url: str, expected_fid: str | None) -> FeedItem | N
     thread_match = THREAD_ID_PATTERN.match(str(link_element.get("id", "")))
     href = str(link_element.get("href", "")).strip()
     title = link_element.get_text(" ", strip=True)
+    normalized_link = normalize_http_link(href, base_url)
     if (
         thread_match is None
-        or not href
+        or normalized_link is None
         or not title
         or not is_expected_forum_link(href, expected_fid)
     ):
@@ -135,7 +189,7 @@ def parse_row(row: Tag, base_url: str, expected_fid: str | None) -> FeedItem | N
     return FeedItem(
         thread_id=thread_match.group("thread_id"),
         title=title,
-        link=urljoin(base_url, href),
+        link=normalized_link,
         author=author or None,
         published_at=parse_timestamp(timestamp_element),
     )
@@ -157,7 +211,11 @@ def parse_forum_a_items(
     返回值：
         按页面顺序排列的帖子元数据列表。
     """
-    if not html.strip() or max_items <= 0:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+    ):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -218,15 +276,23 @@ def parse_forum_b_row(row: Tag, base_url: str, fid: str) -> FeedItem | None:
 
     thread_id = thread_match.group("thread_id")
     href = str(link_element.get("href", "")).strip()
-    href_thread_ids = parse_qs(urlparse(href).query).get("tid", [])
+    normalized_link = normalize_http_link(href, base_url)
+    try:
+        href_thread_ids = parse_qs(urlparse(href).query).get("tid", [])
+    except ValueError:
+        href_thread_ids = []
     title = link_element.get_text(" ", strip=True)
-    if not href or not title or href_thread_ids != [thread_id]:
+    if normalized_link is None or not title or href_thread_ids != [thread_id]:
         return None
 
     author_element = row.select_one("td.author cite a")
     date_element = row.select_one("td.author em")
     author = author_element.get_text(" ", strip=True) if author_element else None
-    canonical_link = urljoin(base_url, f"viewthread.php?tid={thread_id}")
+    canonical_link = normalize_http_link(
+        f"viewthread.php?tid={thread_id}", base_url
+    )
+    if canonical_link is None:
+        return None
     return FeedItem(
         thread_id=f"forum-b:{fid}:{thread_id}",
         title=title,
@@ -253,7 +319,12 @@ def parse_forum_b_items(
         按页面顺序排列并去重的普通主题列表。
     """
     fid = get_expected_fid(base_url)
-    if not html.strip() or max_items <= 0 or fid is None:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+        or fid is None
+    ):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -294,7 +365,11 @@ def parse_forum_b_home_items(
     返回值：
         按精华、点赞、热门顺序排列的帖子元数据列表。
     """
-    if not html.strip() or max_items <= 0:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+    ):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -317,10 +392,23 @@ def parse_forum_b_home_items(
         for link_element in column.select("a[href*='viewthread.php?tid=']"):
             href = str(link_element.get("href", "")).strip()
             title = link_element.get_text(" ", strip=True)
-            tid_values = parse_qs(urlparse(href).query).get("tid", [])
+            try:
+                tid_values = parse_qs(urlparse(href).query).get("tid", [])
+            except ValueError:
+                tid_values = []
             if not href or not title or not tid_values:
                 continue
             thread_id = tid_values[0]
+            if FORUM_B_TID_PATTERN.fullmatch(thread_id) is None:
+                continue
+            normalized_link = normalize_http_link(href, base_url)
+            if normalized_link is None:
+                continue
+            canonical_link = normalize_http_link(
+                f"viewthread.php?tid={thread_id}", base_url
+            )
+            if canonical_link is None:
+                continue
             if thread_id in seen_thread_ids:
                 continue
             seen_thread_ids.add(thread_id)
@@ -328,7 +416,7 @@ def parse_forum_b_home_items(
                 FeedItem(
                     thread_id=f"forum-b:home:{thread_id}",
                     title=f"[{block_name}] {title}",
-                    link=urljoin(base_url, f"viewthread.php?tid={thread_id}"),
+                    link=canonical_link,
                     author=None,
                     published_at=None,
                 )
@@ -415,7 +503,10 @@ def parse_feed_date(raw_value: str) -> datetime | None:
     if not raw_value:
         return None
     try:
-        return email.utils.parsedate_to_datetime(raw_value)
+        parsed_value = email.utils.parsedate_to_datetime(raw_value)
+        if parsed_value.tzinfo is None:
+            parsed_value = parsed_value.replace(tzinfo=timezone.utc)
+        return parsed_value.astimezone(timezone.utc)
     except (TypeError, ValueError, OverflowError):
         pass
     try:
@@ -443,12 +534,25 @@ def parse_rss_items(
     返回值：
         按源顺序排列并去重的条目列表。
     """
-    if not html.strip() or max_items <= 0:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+        or len(html) > MAX_XML_INPUT_CHARS
+    ):
+        return []
+
+    full_text = (
+        html.decode("ascii", errors="ignore")
+        if isinstance(html, bytes)
+        else html
+    )
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", full_text, re.IGNORECASE):
         return []
 
     try:
         root = ElementTree.fromstring(html)
-    except ElementTree.ParseError:
+    except (ElementTree.ParseError, TypeError, ValueError):
         return []
 
     items: list[FeedItem] = []
@@ -466,7 +570,8 @@ def parse_rss_items(
             or find_child_text(element, "id")
             or link
         )
-        if not title or not guid or guid in seen_guids:
+        normalized_link = normalize_http_link(link, base_url)
+        if not title or not guid or normalized_link is None or guid in seen_guids:
             continue
 
         seen_guids.add(guid)
@@ -485,7 +590,7 @@ def parse_rss_items(
             FeedItem(
                 thread_id=f"rss:{guid}",
                 title=title,
-                link=urljoin(base_url, link),
+                link=normalized_link,
                 author=author or None,
                 published_at=parse_feed_date(date_value),
             )
@@ -559,41 +664,65 @@ def parse_mzt_api_items(
     返回值：
         按接口顺序排列并去重的图集列表；JSON 无法解析时返回空列表。
     """
-    if not html.strip() or max_items <= 0:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+        or len(html) > MAX_XML_INPUT_CHARS
+    ):
         return []
     try:
         payload = json.loads(html)
-    except (json.JSONDecodeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
+        return []
+    if not isinstance(payload, dict):
         return []
     raw_items = payload.get("items")
     if not isinstance(raw_items, list):
         return []
-    # 从 base_url 推导站点 origin，用于拼接详情页链接 /view/{id}
-    parsed = urlparse(base_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://mzt.111404.xyz"
+
+    site_root = normalize_http_link("/", base_url)
+    if site_root is None:
+        return []
     items: list[FeedItem] = []
     seen_ids: set[str] = set()
     for entry in raw_items:
         if not isinstance(entry, dict):
             continue
-        iid = str(entry.get("id", "")).strip()
-        title = str(entry.get("title", "")).strip()
-        if not iid or not title or iid in seen_ids:
+        raw_id = entry.get("id")
+        raw_title = entry.get("title")
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, (int, str))
+            or not isinstance(raw_title, str)
+        ):
             continue
-        # 1970-01-01 为上游未设置时间的占位，需视为无时间
-        raw_date = str(entry.get("created_at") or entry.get("updated_at") or "").strip()
-        published = parse_feed_date(raw_date)
-        if published is not None and published.year == 1970:
-            published = None
-        # 若 parse_feed_date 未能解析，尝试 gallery 日期兜底（兼容旧格式）
-        if published is None and raw_date:
-            # parse_feed_date 已处理 ISO8601，此处仅保留 None
-            pass
-        link = urljoin(origin + "/", f"view/{iid}")
-        seen_ids.add(iid)
+        item_id = str(raw_id).strip()
+        title = strip_invalid_xml_chars(raw_title).strip()
+        if (
+            MZT_ID_PATTERN.fullmatch(item_id) is None
+            or not title
+            or item_id in seen_ids
+        ):
+            continue
+        # created_at 无效或为占位年份时，回退到有效的 updated_at。
+        published = None
+        for date_field in ("created_at", "updated_at"):
+            raw_date_value = entry.get(date_field)
+            if not isinstance(raw_date_value, str) or not raw_date_value.strip():
+                continue
+            candidate = parse_feed_date(raw_date_value.strip())
+            if candidate is None or candidate.year == 1970:
+                continue
+            published = candidate
+            break
+        link = normalize_http_link(f"/view/{item_id}", site_root)
+        if link is None:
+            continue
+        seen_ids.add(item_id)
         items.append(
             FeedItem(
-                thread_id=f"mzt:{iid}",
+                thread_id=f"mzt:{item_id}",
                 title=title,
                 link=link,
                 author=None,
@@ -627,14 +756,26 @@ def parse_link_gallery_items(
     返回值：
         按页面顺序排列并去重的图集列表。
     """
-    if not html.strip() or max_items <= 0:
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+    ):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    anchors = (
-        soup.select(link_selector) if link_selector else soup.find_all("a", href=True)
-    )
-    pattern = re.compile(link_pattern) if link_pattern else None
+    try:
+        anchors = (
+            soup.select(link_selector)
+            if link_selector
+            else soup.find_all("a", href=True)
+        )
+    except Exception:
+        return []
+    try:
+        pattern = re.compile(link_pattern) if link_pattern else None
+    except re.error:
+        return []
     items: list[FeedItem] = []
     seen_links: set[str] = set()
 
@@ -645,12 +786,19 @@ def parse_link_gallery_items(
         title = anchor.get_text(" ", strip=True)
         if not href or len(title) < 4 or GALLERY_DATE_PATTERN.fullmatch(title):
             continue
-        if pattern is not None and pattern.search(urlparse(href).path) is None:
-            continue
+        if pattern is not None:
+            try:
+                href_path = urlparse(href).path
+            except ValueError:
+                continue
+            if pattern.search(href_path) is None:
+                continue
         if parent_selector and not has_parent_selector(anchor, parent_selector):
             continue
 
-        link = urljoin(base_url, href)
+        link = normalize_http_link(href, base_url)
+        if link is None:
+            continue
         if link in seen_links:
             continue
         seen_links.add(link)

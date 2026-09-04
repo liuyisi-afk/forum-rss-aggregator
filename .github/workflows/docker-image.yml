@@ -2,28 +2,33 @@ name: Build feeds and deploy to Pages
 
 on:
   schedule:
-    # every 30 minutes
-    - cron: "0,30 * * * *"
-    # daily at 05:00 UTC: full digest archive for forum B
+    # Half past every hour.
+    - cron: "30 * * * *"
+    # Top of each ordinary hour, excluding the digest and deploy runs below.
+    - cron: "0 1-4,6-11,13-23 * * *"
+    # Daily at 05:00 UTC: build the full forum B digest.
     - cron: "0 5 * * *"
+    # At 00:00 and 12:00 UTC: refresh feeds and deploy to Cloudflare Pages.
+    - cron: "0 0,12 * * *"
   workflow_dispatch:
     inputs:
       build_digest:
         description: "Force BUILD_DIGEST_B (1=full archive, 0=skip)"
         required: false
         default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
 
 permissions:
-  contents: write
+  contents: read
 
-# 避免 05:00 全量归档（50 分钟）与半点增量任务并发导致 git push rejected
-# concurrency 会让后触发的任务排队，等前一个完成后再开始（不会直接失败）
 concurrency:
   group: rss-feeds-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  # real values are injected from repo secrets (not visible in public repo)
   SOURCE_URL: ${{ secrets.SOURCE_URL }}
   FORUM_B_BASE_URL: ${{ secrets.FORUM_B_BASE_URL }}
   FORUM_B_INDEX_URL: ${{ secrets.FORUM_B_INDEX_URL }}
@@ -32,14 +37,76 @@ env:
   FEED_TITLE_A: ${{ secrets.FEED_TITLE_A }}
   FEED_TITLE_B: ${{ secrets.FEED_TITLE_B }}
   SECTIONS_B: ${{ secrets.SECTIONS_B }}
-  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-  CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
-  CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
 
 jobs:
-  build-and-deploy:
+  build-forum:
     runs-on: ubuntu-latest
     timeout-minutes: 65
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Build forum feeds
+        env:
+          BUILD_DIGEST_B: ${{ github.event_name == 'workflow_dispatch' && inputs.build_digest || (github.event.schedule == '0 5 * * *' && '1' || '0') }}
+        run: python scripts/build_feeds.py public --only-forum
+
+      - name: Upload forum artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: forum-feeds
+          path: |
+            public/rss.xml
+            public/caoliu-digest.xml
+            public/forum-b*.xml
+          if-no-files-found: error
+
+  build-gallery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Build gallery feeds
+        run: python scripts/build_feeds.py public --only-gallery
+
+      - name: Upload gallery artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-feeds
+          path: |
+            public/gallery.xml
+            public/gallery/
+            public/feeds.opml
+          if-no-files-found: error
+
+  merge-deploy:
+    needs: [build-forum, build-gallery]
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -47,69 +114,72 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Download forum feeds
+        uses: actions/download-artifact@v4
         with:
-          python-version: "3.11"
-          cache: "pip"
+          name: forum-feeds
+          path: ${{ runner.temp }}/forum-feeds
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Generate RSS feeds
-        run: |
-          # 05:00 UTC 的全量归档不要依赖 github.event.schedule 比较（该字段在双 cron 时不可靠）
-          # 直接按 UTC 小时判断；workflow_dispatch 可通过 input 强制指定
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.build_digest }}" ]; then
-            export BUILD_DIGEST_B="${{ inputs.build_digest }}"
-          elif [ "$(date -u +%H)" = "05" ]; then
-            export BUILD_DIGEST_B=1
-          else
-            export BUILD_DIGEST_B=0
-          fi
-          echo "BUILD_DIGEST_B=$BUILD_DIGEST_B"
-          python scripts/build_feeds.py public
+      - name: Download gallery feeds
+        uses: actions/download-artifact@v4
+        with:
+          name: gallery-feeds
+          path: ${{ runner.temp }}/gallery-feeds
 
       - name: Commit feeds back to repo
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
         run: |
+          set -euo pipefail
+
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "repository default branch is unavailable"
+            exit 1
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public
-          if git diff --cached --quiet; then
-            echo "no feed changes"
-            exit 0
-          fi
-          git commit -m "chore: refresh RSS feeds [skip ci]"
-          # 并发重试：先直接 push，失败则 pull --rebase 后重试，最多 3 次
-          for i in 1 2 3; do
-            if git push; then
-              echo "push succeeded on attempt $i"
+
+          for attempt in 1 2 3; do
+            echo "push attempt $attempt"
+            if ! git fetch --no-tags origin "refs/heads/$TARGET_BRANCH"; then
+              echo "fetch failed on attempt $attempt"
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$((attempt * 5))"
+              fi
+              continue
+            fi
+            git checkout -B "$TARGET_BRANCH" FETCH_HEAD
+
+            mkdir -p public
+            cp -a "$RUNNER_TEMP/forum-feeds/." public/
+            cp -a "$RUNNER_TEMP/gallery-feeds/." public/
+            git add public
+
+            if git diff --cached --quiet; then
+              echo "no feed changes"
               exit 0
             fi
-            echo "push failed (attempt $i), rebasing..."
-            git fetch origin master
-            if ! git pull --rebase --autostash origin master; then
-              echo "rebase conflict, abort and reset"
-              git rebase --abort || true
-              git reset --hard origin/master
-              # 重新应用我们的 public 变更（如果还有差异）
-              # 已在上游已有相同或更新的 feeds 时，直接退出视为成功
-              if git diff --quiet && git diff --cached --quiet; then
-                echo "no local changes after reset, treating as success"
-                exit 0
-              fi
-              # 尝试重新提交（幂等）
-              git add public
-              if git diff --cached --quiet; then
-                echo "no changes to recommit"
-                exit 0
-              fi
-              git commit -m "chore: refresh RSS feeds [skip ci]" || true
+
+            git commit -m "chore: refresh RSS feeds [skip ci]"
+            if git push origin "HEAD:refs/heads/$TARGET_BRANCH"; then
+              echo "push succeeded on attempt $attempt"
+              exit 0
             fi
-            sleep $((i*5))
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 5))"
+            fi
           done
-          echo "push failed after retries"
+
+          echo "push failed after 3 attempts"
           exit 1
 
       - name: Deploy to Cloudflare Pages
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 0,12 * * *'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
         run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main

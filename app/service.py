@@ -145,7 +145,8 @@ class FeedService:
             content=self.cached_result.content,
             is_stale=True,
             generated_at=self.cached_result.generated_at,
-            items=self.cached_result.items,
+            # 返回独立列表，避免调用方修改缓存中的条目集合。
+            items=list(self.cached_result.items),
         )
 
     def get_feed(self) -> FeedResult:
@@ -246,9 +247,13 @@ class AggregateFeedService:
         for child in self.children:
             try:
                 child_results.append(child.get_feed())
-            except FeedServiceError:
+            except Exception as error:
                 # 单个来源不可用时继续输出其余来源，避免聚合整体失效。
-                LOGGER.warning("Aggregate child skipped: %s", type(child).__name__)
+                LOGGER.warning(
+                    "Aggregate child skipped: %s (%s)",
+                    type(child).__name__,
+                    type(error).__name__,
+                )
         if not child_results:
             raise FeedServiceError("RSS 暂时不可用")
 
@@ -262,17 +267,20 @@ class AggregateFeedService:
                 merged_items.append(item)
 
         ordered_items = self.sort_items(merged_items)[: self.settings.max_feed_items]
-        now = datetime.now(timezone.utc)
+        generated_at = max(
+            (result.generated_at for result in child_results),
+            default=datetime.now(timezone.utc),
+        )
         content = build_rss(
             ordered_items,
             self.feed_title,
             self.source_url,
             self.public_feed_url,
-            now,
+            generated_at,
         )
         return FeedResult(
             content=content,
             is_stale=any(result.is_stale for result in child_results),
-            generated_at=now,
+            generated_at=generated_at,
             items=ordered_items,
         )

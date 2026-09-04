@@ -3,8 +3,9 @@
 from typing import Any
 
 import requests
+import pytest
 
-from app.fetcher import ForumFetcher
+from app.fetcher import FeedFetchError, ForumFetcher
 
 
 class FakeClock:
@@ -86,6 +87,49 @@ class FakeSession(requests.Session):
         return FakeResponse()
 
 
+class StreamingResponse:
+    """模拟可迭代读取且可关闭的 HTTP 响应。"""
+
+    encoding = "utf-8"
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        """保存响应分块并初始化关闭状态。
+
+        参数：
+            chunks: 依次返回的字节分块。
+        返回值：
+            无。
+        """
+        self.chunks = chunks
+        self.headers: dict[str, str] = {}
+        self.is_closed = False
+
+    def raise_for_status(self) -> None:
+        """模拟 HTTP 状态成功。"""
+
+    def iter_content(self, chunk_size: int):
+        """返回响应字节分块。"""
+        return iter(self.chunks)
+
+    def close(self) -> None:
+        """记录响应已关闭。"""
+        self.is_closed = True
+
+
+class StreamingSession:
+    """返回固定流式响应并记录请求参数。"""
+
+    def __init__(self, response: StreamingResponse) -> None:
+        """保存待返回的响应。"""
+        self.response = response
+        self.kwargs: dict = {}
+
+    def get(self, url: str, **kwargs):
+        """记录请求选项并返回流式响应。"""
+        self.kwargs = kwargs
+        return self.response
+
+
 def test_forum_fetcher_waits_between_shared_requests() -> None:
     """验证连续请求同一共享实例时至少等待配置间隔。
 
@@ -110,3 +154,27 @@ def test_forum_fetcher_waits_between_shared_requests() -> None:
 
     assert session.call_count == 2
     assert clock.sleep_calls == [10.0]
+
+
+def test_forum_fetcher_streams_and_closes_response() -> None:
+    """验证下载器以流式方式读取并释放响应连接。"""
+    response = StreamingResponse([b"<html>", b"ok</html>"])
+    session = StreamingSession(response)
+    fetcher = ForumFetcher(0, 20, "test-agent", session=session)
+
+    assert fetcher.fetch_html("https://example.com/feed") == "<html>ok</html>"
+    assert session.kwargs["stream"] is True
+    assert response.is_closed is True
+
+
+def test_forum_fetcher_rejects_oversized_stream() -> None:
+    """验证响应超过上限时不会继续拼接全部正文。"""
+    response = StreamingResponse([b"1234", b"5678"])
+    session = StreamingSession(response)
+    fetcher = ForumFetcher(
+        0, 20, "test-agent", session=session, max_response_bytes=5
+    )
+
+    with pytest.raises(FeedFetchError, match="超过大小限制"):
+        fetcher.fetch_html("https://example.com/feed")
+    assert response.is_closed is True

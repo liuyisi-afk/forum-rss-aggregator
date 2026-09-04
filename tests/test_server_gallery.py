@@ -4,7 +4,8 @@ from functools import partial
 
 from app.config import Settings
 from app.models import FeedSource
-from app.server import create_feed_services
+from app.parser import parse_mzt_api_items
+from app.server import create_feed_services, select_parser
 
 
 def build_test_settings() -> Settings:
@@ -53,3 +54,39 @@ def test_create_feed_services_registers_gallery_routes() -> None:
     assert services["/gallery/one.xml"].parser.__name__ == "parse_rss_items"
     assert isinstance(services["/gallery/two.xml"].parser, partial)
     assert services["/gallery/two.xml"].parser.keywords["link_pattern"] == "^/album/"
+
+
+def test_select_parser_dispatches_mzt_sources() -> None:
+    """验证服务端将显式 mzt 来源分发给 JSON API 解析器。"""
+    source = FeedSource(
+        key="mzt",
+        source_url="https://mzt.example.com/urls?page=1&pageSize=50",
+        feed_title="妹子图",
+        route="/gallery/mzt.xml",
+        public_feed_url="https://rss.example.com/gallery/mzt.xml",
+        parser_kind="mzt",
+    )
+
+    assert select_parser(source, keep_image_posts_only=False) is parse_mzt_api_items
+
+
+def test_select_parser_auto_gallery_falls_back_from_rss_path() -> None:
+    """验证 auto 图站即使 URL 像 RSS 也会回退到链接解析。"""
+    source = FeedSource(
+        key="auto",
+        source_url="https://gallery.example.com/feed",
+        feed_title="自动图站",
+        route="/gallery/auto.xml",
+        public_feed_url="https://rss.example.com/gallery/auto.xml",
+        parser_kind="auto",
+        link_pattern="^/album/",
+    )
+
+    parser = select_parser(source, keep_image_posts_only=False)
+    items = parser(
+        "<a href='/album/1'>一个图集标题</a>", source.source_url, 10
+    )
+
+    assert [item.link for item in items] == [
+        "https://gallery.example.com/album/1"
+    ]

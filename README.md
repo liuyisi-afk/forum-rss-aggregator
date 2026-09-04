@@ -42,7 +42,7 @@
 ## 架构
 
 - 应用（Flask + Gunicorn）监听 `127.0.0.1:28888`，按主机级 10 秒限速抓取索引页。
-- 图站来源配置在 `config/gallery_sources.json`，`rss` 表示直接转发站点自带 RSS，`links` 表示解析首页图集链接。
+- 图站来源配置在 `config/gallery_sources.json`：`rss` 直通站点 RSS，`links` 解析首页图集链接，`auto` 在 RSS 无条目时回退到链接解析，`mzt` 解析妹子图 JSON API。
 - nginx 反向代理到本地应用，80 端口 301 跳转 HTTPS，443 使用源站证书。
 - 可选前置 CDN（如 Cloudflare）：源站证书可由 CDN 的 Origin CA 接口签发，Zone SSL 使用 Full (strict)。
 
@@ -64,6 +64,8 @@ $env:PUBLIC_BASE_URL='https://rss.example.com'
 .\.venv\Scripts\python.exe scripts\build_feeds.py public --only-gallery
 ```
 
+静态构建会在抓取前校验 `PUBLIC_BASE_URL`、分页参数和图站来源（key、URL、正则）；论坛与图站模式互斥，可分别在 CI 中运行。图站抓取按主机共享限速器，不同主机可并行执行。
+
 ## 配置
 
 通过环境变量注入（参考 `.env.example` 与 `deploy/rss-feed.env.example`）：
@@ -79,6 +81,7 @@ $env:PUBLIC_BASE_URL='https://rss.example.com'
 | `FAILURE_RETRY_SECONDS` | 抓取失败后的重试退避秒数 |
 | `MIN_FETCH_INTERVAL_SECONDS` | 任意两次上游请求的最小间隔（默认 10 秒） |
 | `REQUEST_TIMEOUT_SECONDS` | 单次请求超时 |
+| `MAX_RESPONSE_BYTES` | 单次上游响应最大字节数（默认 10 MiB） |
 | `MAX_FEED_ITEMS` | 每个订阅最多条目数 |
 | `USER_AGENT` | 请求 User-Agent |
 | `KEEP_IMAGE_POSTS_ONLY` | `1` 只保留带图帖子，`0` 保留全部 |
@@ -108,3 +111,4 @@ bash deploy/install-nginx.sh
 - 不在仓库、日志或文档中保存密码、API Token 或证书私钥。
 - RSS 只输出标题、链接、作者、发布时间和 thread id（纯文本元数据）。
 - 不绕过登录、验证码、反爬或访问限制。
+- RSS 响应提供 `ETag` / `Last-Modified`，支持阅读器条件请求；快照文件默认位于 `/var/rss-feed/caoliu-digest.xml`。

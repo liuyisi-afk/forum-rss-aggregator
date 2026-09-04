@@ -13,6 +13,30 @@ DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 ElementTree.register_namespace("dc", DC_NAMESPACE)
 
 
+def strip_invalid_xml_chars(value: str) -> str:
+    """移除 XML 1.0 不允许的控制字符和孤立代理字符。
+
+    参数：
+        value: 待写入 XML 的文本。
+    返回值：
+        仅包含 XML 1.0 合法字符的文本。
+    """
+    if not isinstance(value, str):
+        return ""
+    valid_characters = []
+    for character in value:
+        codepoint = ord(character)
+        is_valid = (
+            codepoint in (0x9, 0xA, 0xD)
+            or 0x20 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint <= 0x10FFFF
+        )
+        if is_valid:
+            valid_characters.append(character)
+    return "".join(valid_characters)
+
+
 def append_text_element(parent: ElementTree.Element, name: str, value: str) -> None:
     """添加文本子元素，集中处理 XML 元素赋值。
 
@@ -24,7 +48,7 @@ def append_text_element(parent: ElementTree.Element, name: str, value: str) -> N
         无。
     """
     element = ElementTree.SubElement(parent, name)
-    element.text = value
+    element.text = strip_invalid_xml_chars(value)
 
 
 def append_item(channel: ElementTree.Element, item: FeedItem) -> None:
@@ -40,7 +64,7 @@ def append_item(channel: ElementTree.Element, item: FeedItem) -> None:
     append_text_element(item_element, "title", item.title)
     append_text_element(item_element, "link", item.link)
     guid = ElementTree.SubElement(item_element, "guid", {"isPermaLink": "false"})
-    guid.text = item.thread_id
+    guid.text = strip_invalid_xml_chars(item.thread_id)
 
     if item.author:
         append_text_element(item_element, f"{{{DC_NAMESPACE}}}creator", item.author)
@@ -93,14 +117,16 @@ def build_opml(entries: list[tuple[str, str]]) -> bytes:
     append_text_element(head, "title", "RSS Feeds")
     body = ElementTree.SubElement(opml, "body")
     for title, url in entries:
+        safe_title = strip_invalid_xml_chars(title)
+        safe_url = strip_invalid_xml_chars(url)
         ElementTree.SubElement(
             body,
             "outline",
             {
-                "text": title,
-                "title": title,
+                "text": safe_title,
+                "title": safe_title,
                 "type": "rss",
-                "xmlUrl": url,
+                "xmlUrl": safe_url,
             },
         )
     return ElementTree.tostring(opml, encoding="utf-8", xml_declaration=True)

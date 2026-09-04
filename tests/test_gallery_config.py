@@ -59,5 +59,5 @@ def test_load_gallery_sources_rejects_invalid_parser(tmp_path: Path) -> None:
         [{"key": "bad", "title": "坏配置", "url": "https://a.example.com/", "parser": "unknown"}],
     )
 
-    with pytest.raises(ValueError, match="parser 必须是 rss 或 links"):
+    with pytest.raises(ValueError, match="parser 必须是 auto、rss、links 或 mzt"):
         load_gallery_sources("https://rss.example.com", path)

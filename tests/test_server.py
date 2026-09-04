@@ -196,3 +196,46 @@ def test_stale_feed_uses_short_retry_cache() -> None:
 
     assert response.headers["X-Feed-Stale"] == "true"
     assert response.headers["Cache-Control"] == "public, max-age=60"
+
+
+def test_feed_handler_supports_etag_conditional_requests() -> None:
+    """验证客户端带 If-None-Match 时可复用未变化的 RSS 内容。"""
+    services = {"/rss.xml": StaticFeedService()}
+    app = create_app(build_test_settings(), services)
+    client = app.test_client()
+
+    first_response = client.get("/rss.xml")
+    etag = first_response.headers.get("ETag")
+
+    assert first_response.status_code == 200
+    assert etag and etag.startswith('"')
+    assert first_response.headers.get("Last-Modified")
+
+    not_modified = client.get(
+        "/rss.xml", headers={"If-None-Match": etag}
+    )
+
+    assert not_modified.status_code == 304
+    assert not_modified.data == b""
+    assert not_modified.headers["ETag"] == etag
+    assert not_modified.headers["Cache-Control"] == "public, max-age=600"
+
+
+def test_feed_handler_does_not_cache_initial_failure() -> None:
+    """验证没有缓存时的 502 不会被代理缓存。"""
+
+    class FailingService:
+        """模拟尚未生成过内容的来源。"""
+
+        def get_feed(self) -> FeedResult:
+            """始终抛出统一的暂不可用错误。"""
+            from app.service import FeedServiceError
+
+            raise FeedServiceError("unavailable")
+
+    app = create_app(build_test_settings(), {"/rss.xml": FailingService()})
+
+    response = app.test_client().get("/rss.xml")
+
+    assert response.status_code == 502
+    assert response.headers["Cache-Control"] == "no-store"

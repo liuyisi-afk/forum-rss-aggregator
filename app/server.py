@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 from functools import partial
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
-from app.config import FORUM_B_INDEX_URL, Settings, get_feed_sources, get_settings
+from app.config import (
+    FORUM_B_INDEX_URL,
+    Settings,
+    get_feed_sources,
+    get_settings,
+)
 from app.feed import build_opml
 from app.fetcher import ForumFetcher
-from app.models import FeedResult, FeedSource
+from app.models import FeedItem, FeedResult, FeedSource
 from app.parser import (
     parse_forum_b_home_items,
     parse_forum_b_items,
@@ -40,6 +48,40 @@ class FeedProvider(Protocol):
         ...
 
 
+def parse_auto_gallery_items(
+    html: str,
+    base_url: str,
+    max_items: int,
+    *,
+    link_pattern: str = "",
+    link_selector: str = "",
+    parent_selector: str = "",
+) -> list[FeedItem]:
+    """解析自动图站来源，RSS 无条目时回退到首页链接。
+
+    参数：
+        html: 图站返回的页面文本。
+        base_url: 来源页面地址。
+        max_items: 最多保留的条目数。
+        link_pattern: 可选的图集链接正则。
+        link_selector: 可选的图集链接 CSS 选择器。
+        parent_selector: 可选的祖先过滤选择器。
+    返回值：
+        RSS 或链接解析得到的条目列表。
+    """
+    rss_items = parse_rss_items(html, base_url, max_items)
+    if rss_items:
+        return rss_items
+    return parse_link_gallery_items(
+        html,
+        base_url,
+        max_items,
+        link_pattern=link_pattern,
+        link_selector=link_selector,
+        parent_selector=parent_selector,
+    )
+
+
 def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser:
     """根据来源配置选择解析器，图站显式配置优先于路径推断。
 
@@ -49,11 +91,20 @@ def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser
     返回值：
         绑定过滤开关的解析函数。
     """
-    if source.parser_kind == "rss":
+    if source.parser_kind == "auto" and source.route.startswith("/gallery/"):
+        return partial(
+            parse_auto_gallery_items,
+            link_pattern=source.link_pattern,
+            link_selector=source.link_selector,
+            parent_selector=source.parent_selector,
+        )
+
+    parser_kind = source.parser_kind
+    if parser_kind == "rss":
         return parse_rss_items
-    if source.parser_kind == "mzt":
+    if parser_kind == "mzt":
         return parse_mzt_api_items
-    if source.parser_kind == "links":
+    if parser_kind == "links":
         return partial(
             parse_link_gallery_items,
             link_pattern=source.link_pattern,
@@ -83,6 +134,7 @@ def create_fetcher(settings: Settings) -> ForumFetcher:
         min_interval_seconds=settings.min_fetch_interval_seconds,
         timeout_seconds=settings.request_timeout_seconds,
         user_agent=settings.user_agent,
+        max_response_bytes=settings.max_response_bytes,
     )
 
 
@@ -172,17 +224,107 @@ def create_feed_handler(
         try:
             result = feed_service.get_feed()
         except FeedServiceError:
-            return jsonify({"error": "feed_temporarily_unavailable"}), 502
+            response = jsonify({"error": "feed_temporarily_unavailable"})
+            response.headers["Cache-Control"] = "no-store"
+            return response, 502
 
+        return make_feed_response(result, cache_seconds, failure_retry_seconds)
+
+    return handle_feed
+
+
+def build_content_etag(content: bytes) -> str:
+    """根据响应字节生成稳定的强 ETag。
+
+    参数：
+        content: 要发送的响应正文。
+    返回值：
+        带双引号的 ETag 值。
+    """
+    digest = hashlib.sha256(content).hexdigest()
+    return f'"{digest}"'
+
+
+def format_http_date(value: datetime) -> str:
+    """将时间规范化为 HTTP-date 格式。
+
+    参数：
+        value: 生成或修改时间。
+    返回值：
+        GMT 时区的 HTTP-date 字符串。
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    normalized = value.astimezone(timezone.utc).replace(microsecond=0)
+    return format_datetime(normalized, usegmt=True)
+
+
+def is_cache_not_modified(etag: str, last_modified: str) -> bool:
+    """判断请求条件是否允许返回 304。
+
+    参数：
+        etag: 当前响应的 ETag。
+        last_modified: 当前响应的 Last-Modified 值。
+    返回值：
+        条件匹配时返回 True。
+    """
+    if_none_match = request.headers.get("If-None-Match", "")
+    if if_none_match:
+        for candidate in if_none_match.split(","):
+            normalized = candidate.strip()
+            if normalized == "*" or normalized == etag:
+                return True
+            if normalized.startswith("W/") and normalized[2:] == etag:
+                return True
+        return False
+
+    if_modified_since = request.headers.get("If-Modified-Since")
+    if not if_modified_since:
+        return False
+    try:
+        modified_since = parsedate_to_datetime(if_modified_since)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if modified_since.tzinfo is None:
+        modified_since = modified_since.replace(tzinfo=timezone.utc)
+    try:
+        current = parsedate_to_datetime(last_modified)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return current <= modified_since.astimezone(timezone.utc)
+
+
+def make_feed_response(
+    result: FeedResult, cache_seconds: int, failure_retry_seconds: int
+) -> Response:
+    """创建带条件缓存头的 RSS 响应。
+
+    参数：
+        result: RSS 内容及缓存状态。
+        cache_seconds: 新鲜内容的客户端缓存秒数。
+        failure_retry_seconds: 陈旧内容的客户端重试秒数。
+    返回值：
+        RSS 正常响应或 304 Not Modified 响应。
+    """
+    etag = build_content_etag(result.content)
+    last_modified = format_http_date(result.generated_at)
+    max_age = failure_retry_seconds if result.is_stale else cache_seconds
+    headers = {
+        "Cache-Control": f"public, max-age={max_age}",
+        "ETag": etag,
+        "Last-Modified": last_modified,
+        "X-Feed-Stale": "true" if result.is_stale else "false",
+    }
+    if is_cache_not_modified(etag, last_modified):
+        response = Response(
+            status=304, content_type="application/rss+xml; charset=utf-8"
+        )
+    else:
         response = Response(
             result.content, content_type="application/rss+xml; charset=utf-8"
         )
-        response.headers["X-Feed-Stale"] = "true" if result.is_stale else "false"
-        max_age = failure_retry_seconds if result.is_stale else cache_seconds
-        response.headers["Cache-Control"] = f"public, max-age={max_age}"
-        return response
-
-    return handle_feed
+    response.headers.update(headers)
+    return response
 
 
 def create_app(
@@ -198,7 +340,12 @@ def create_app(
         配置完成的 Flask 应用。
     """
     runtime_settings = settings or get_settings()
-    services = feed_services or create_feed_services(runtime_settings)
+    # 允许调用方显式传入空字典，便于健康检查或无来源部署的测试/探针场景。
+    services = (
+        feed_services
+        if feed_services is not None
+        else create_feed_services(runtime_settings)
+    )
     app = Flask(__name__)
     app.extensions["feed_services"] = services
 
@@ -254,19 +401,41 @@ def create_app(
         返回值：
             快照 RSS XML；快照尚未生成时返回 404。
         """
-        snapshot_path = os.getenv(
-            "CAOLIU_DIGEST_FILE", "/opt/rss-feed/var/caoliu-digest.xml"
+        configured_path = os.getenv("CAOLIU_DIGEST_FILE")
+        snapshot_paths = (
+            [Path(configured_path)]
+            if configured_path
+            else [
+                # Docker/Compose 共享卷的标准路径。
+                Path("/var/rss-feed/caoliu-digest.xml"),
+                # 兼容旧版 systemd/容器配置，避免升级时丢失已有快照。
+                Path("/opt/rss-feed/var/caoliu-digest.xml"),
+            ]
         )
-        try:
-            content = Path(snapshot_path).read_bytes()
-        except OSError:
+        content = None
+        selected_path = None
+        for snapshot_path in snapshot_paths:
+            try:
+                content = snapshot_path.read_bytes()
+                selected_path = snapshot_path
+                break
+            except (OSError, ValueError):
+                continue
+        if content is None or selected_path is None:
             return jsonify({"error": "snapshot_not_ready"}), 404
 
-        response = Response(
-            content, content_type="application/rss+xml; charset=utf-8"
+        try:
+            generated_at = datetime.fromtimestamp(
+                selected_path.stat().st_mtime, timezone.utc
+            )
+        except OSError:
+            generated_at = datetime.now(timezone.utc)
+        result = FeedResult(
+            content=content,
+            is_stale=False,
+            generated_at=generated_at,
         )
-        response.headers["Cache-Control"] = "public, max-age=3600"
-        return response, 200
+        return make_feed_response(result, 3600, 3600)
 
     for route, feed_service in services.items():
         endpoint = "feed_" + route.strip("/").replace("/", "_").replace(".", "_")
