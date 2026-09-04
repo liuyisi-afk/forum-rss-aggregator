@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import email.utils
+import json
 import re
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
 
+from app.feed import strip_invalid_xml_chars
 from app.models import FeedItem
 
 
@@ -33,6 +35,7 @@ GALLERY_DATE_PATTERN = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
 ALLOWED_LINK_SCHEMES = frozenset({"http", "https"})
 MAX_XML_INPUT_CHARS = 5_000_000
 FORUM_B_TID_PATTERN = re.compile(r"^\d+$")
+MZT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def normalize_http_link(raw_link: str, base_url: str) -> str | None:
@@ -643,6 +646,92 @@ def has_parent_selector(anchor: Tag, selector: str) -> bool:
             return True
         parent = parent.parent
     return False
+
+
+def parse_mzt_api_items(
+    html: str,
+    base_url: str,
+    max_items: int,
+    keep_image_posts_only: bool = False,  # noqa: ARG001
+) -> list[FeedItem]:
+    """解析妹子图（mzt.111404.xyz）JSON API `/urls` 列表。
+
+    参数：
+        html: `/urls?page=1&pageSize=xx` 返回的 JSON 文本（非 HTML）。
+        base_url: 请求 URL，用于推导站点 origin（如 https://mzt.111404.xyz/urls?...）。
+        max_items: 最多保留条目数。
+        keep_image_posts_only: 兼容签名，未使用。
+    返回值：
+        按接口顺序排列并去重的图集列表；JSON 无法解析时返回空列表。
+    """
+    if (
+        not isinstance(html, (str, bytes))
+        or not html.strip()
+        or not is_valid_max_items(max_items)
+        or len(html) > MAX_XML_INPUT_CHARS
+    ):
+        return []
+    try:
+        payload = json.loads(html)
+    except (TypeError, ValueError, RecursionError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return []
+
+    site_root = normalize_http_link("/", base_url)
+    if site_root is None:
+        return []
+    items: list[FeedItem] = []
+    seen_ids: set[str] = set()
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("id")
+        raw_title = entry.get("title")
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, (int, str))
+            or not isinstance(raw_title, str)
+        ):
+            continue
+        item_id = str(raw_id).strip()
+        title = strip_invalid_xml_chars(raw_title).strip()
+        if (
+            MZT_ID_PATTERN.fullmatch(item_id) is None
+            or not title
+            or item_id in seen_ids
+        ):
+            continue
+        # created_at 无效或为占位年份时，回退到有效的 updated_at。
+        published = None
+        for date_field in ("created_at", "updated_at"):
+            raw_date_value = entry.get(date_field)
+            if not isinstance(raw_date_value, str) or not raw_date_value.strip():
+                continue
+            candidate = parse_feed_date(raw_date_value.strip())
+            if candidate is None or candidate.year == 1970:
+                continue
+            published = candidate
+            break
+        link = normalize_http_link(f"/view/{item_id}", site_root)
+        if link is None:
+            continue
+        seen_ids.add(item_id)
+        items.append(
+            FeedItem(
+                thread_id=f"mzt:{item_id}",
+                title=title,
+                link=link,
+                author=None,
+                published_at=published,
+            )
+        )
+        if len(items) >= max_items:
+            break
+    return items
 
 
 def parse_link_gallery_items(

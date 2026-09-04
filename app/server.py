@@ -19,7 +19,6 @@ from app.config import (
     Settings,
     get_feed_sources,
     get_settings,
-    infer_gallery_parser_kind,
 )
 from app.feed import build_opml
 from app.fetcher import ForumFetcher
@@ -29,6 +28,7 @@ from app.parser import (
     parse_forum_b_items,
     parse_forum_a_items,
     parse_link_gallery_items,
+    parse_mzt_api_items,
     parse_rss_items,
 )
 from app.service import AggregateFeedService, FeedParser, FeedService, FeedServiceError
@@ -91,19 +91,20 @@ def select_parser(source: FeedSource, keep_image_posts_only: bool) -> FeedParser
     返回值：
         绑定过滤开关的解析函数。
     """
+    if source.parser_kind == "auto" and source.route.startswith("/gallery/"):
+        return partial(
+            parse_auto_gallery_items,
+            link_pattern=source.link_pattern,
+            link_selector=source.link_selector,
+            parent_selector=source.parent_selector,
+        )
+
     parser_kind = source.parser_kind
-    if parser_kind == "auto" and source.route.startswith("/gallery/"):
-        parser_kind = infer_gallery_parser_kind(source.source_url)
     if parser_kind == "rss":
         return parse_rss_items
+    if parser_kind == "mzt":
+        return parse_mzt_api_items
     if parser_kind == "links":
-        if source.parser_kind == "auto" and source.route.startswith("/gallery/"):
-            return partial(
-                parse_auto_gallery_items,
-                link_pattern=source.link_pattern,
-                link_selector=source.link_selector,
-                parent_selector=source.parent_selector,
-            )
         return partial(
             parse_link_gallery_items,
             link_pattern=source.link_pattern,

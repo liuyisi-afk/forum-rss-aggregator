@@ -292,9 +292,9 @@ def load_gallery_sources(
         if normalized_key in seen_keys:
             raise ValueError(f"图站来源 key 重复: {key}")
         seen_keys.add(normalized_key)
-        if parser_kind not in {"auto", "rss", "links"}:
+        if parser_kind not in {"auto", "rss", "links", "mzt"}:
             raise ValueError(
-                f"图站来源 {key} 的 parser 必须是 rss 或 links（也可使用 auto）"
+                f"图站来源 {key} 的 parser 必须是 auto、rss、links 或 mzt"
             )
         validate_http_url(url, f"图站来源 {key} 的 url")
 

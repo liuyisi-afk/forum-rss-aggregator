@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import infer_gallery_parser_kind, load_gallery_sources
+from app.config import load_gallery_sources
 from app.feed import build_opml, build_rss
 from app.fetcher import DEFAULT_MAX_RESPONSE_BYTES, ForumFetcher
 from app.models import FeedItem
@@ -28,6 +28,7 @@ from app.parser import (
     parse_forum_b_home_items,
     parse_forum_b_items,
     parse_link_gallery_items,
+    parse_mzt_api_items,
     parse_rss_items,
 )
 
@@ -146,13 +147,14 @@ def validate_gallery_sources(sources) -> tuple:
             raise ValueError(
                 f"图站来源 {key or '<empty>'} 的 key 只能包含字母、数字、_ 或 -"
             )
-        if key in seen_keys:
+        normalized_key = key.casefold()
+        if normalized_key in seen_keys:
             raise ValueError(f"图站来源 key 重复: {key}")
-        seen_keys.add(key)
+        seen_keys.add(normalized_key)
 
-        if source.parser_kind not in {"auto", "rss", "links"}:
+        if source.parser_kind not in {"auto", "rss", "links", "mzt"}:
             raise ValueError(
-                f"图站来源 {key} 的 parser 必须是 rss、links 或 auto"
+                f"图站来源 {key} 的 parser 必须是 auto、rss、links 或 mzt"
             )
 
         validate_http_url(source.source_url, f"图站来源 {key} 的 url")
@@ -188,41 +190,81 @@ def get_gallery_host(source_url: str) -> str:
     return (parsed.hostname or parsed.netloc).lower()
 
 
+def create_host_fetcher(template: ForumFetcher) -> ForumFetcher:
+    """复制下载器的限速配置，为另一个上游主机创建独立会话。
+
+    参数：
+        template: 提供限速、超时、User-Agent 和响应上限的模板。
+    返回值：
+        配置一致但锁和会话独立的新下载器。
+    """
+    return ForumFetcher(
+        min_interval_seconds=template.min_interval_seconds,
+        timeout_seconds=template.timeout_seconds,
+        user_agent=template.user_agent,
+        clock=template.clock,
+        sleeper=template.sleeper,
+        max_response_bytes=template.max_response_bytes,
+    )
+
+
+def get_host_fetcher(fetchers_by_host: dict, template, source_url: str):
+    """为 URL 返回按主机共享的下载器，并兼容测试替身。
+
+    参数：
+        fetchers_by_host: 已创建的主机到下载器映射。
+        template: 真实 ForumFetcher 或测试替身。
+        source_url: 即将抓取的来源地址。
+    返回值：
+        此主机应复用的下载器。
+    """
+    host = get_gallery_host(source_url)
+    existing_fetcher = fetchers_by_host.get(host)
+    if existing_fetcher is not None:
+        return existing_fetcher
+
+    if not isinstance(template, ForumFetcher):
+        host_fetcher = template
+    elif not fetchers_by_host:
+        host_fetcher = template
+    else:
+        host_fetcher = create_host_fetcher(template)
+    fetchers_by_host[host] = host_fetcher
+    return host_fetcher
+
+
 def build_gallery_fetchers(
-    fetcher: ForumFetcher, sources
-) -> dict[str, ForumFetcher]:
+    fetcher: ForumFetcher, sources, fetchers_by_host: dict | None = None
+) -> dict:
     """为每个上游主机创建共享限速、跨主机并行的下载器。
 
     参数：
         fetcher: 包含限速参数的模板下载器。
         sources: 图站来源配置。
+        fetchers_by_host: 可选的已有映射，用于与论坛抓取共享主机限速。
     返回值：
         主机名到下载器的映射；同主机来源共享一个锁。
     """
-    if not isinstance(fetcher, ForumFetcher):
-        # 允许脚本测试注入轻量 fake fetcher，不强行访问真实网络。
-        return {get_gallery_host(source.source_url): fetcher for source in sources}
-
-    fetchers = {}
+    fetchers = fetchers_by_host if fetchers_by_host is not None else {}
     for source in sources:
-        host = get_gallery_host(source.source_url)
-        if host in fetchers:
-            continue
-        fetcher_options = {
-            "min_interval_seconds": fetcher.min_interval_seconds,
-            "timeout_seconds": fetcher.timeout_seconds,
-            "user_agent": fetcher.user_agent,
-            "clock": fetcher.clock,
-            "sleeper": fetcher.sleeper,
-        }
-        if hasattr(fetcher, "max_response_bytes"):
-            fetcher_options["max_response_bytes"] = fetcher.max_response_bytes
-        fetchers[host] = ForumFetcher(
-            **fetcher_options,
-        )
-        # full 模式可能刚用模板抓过论坛；保守继承时间戳，避免同主机立即重试。
-        fetchers[host].last_request_at = fetcher.last_request_at
+        get_host_fetcher(fetchers, fetcher, source.source_url)
     return fetchers
+
+# 关键源不受其他源失败/限速影响：单独限速器 + 优先抓取 + 更多重试
+CRITICAL_GALLERY_KEYS = {"mzt", "91tutu", "91shenshi"}
+CRITICAL_RETRIES = 5
+DEFAULT_RETRIES = 3
+
+
+def is_critical_gallery(source) -> bool:
+    """判断图站来源是否属于需要优先保障的关键源。
+
+    参数：
+        source: 图站来源对象。
+    返回值：
+        key 不区分大小写命中关键集合时返回 True。
+    """
+    return str(source.key).casefold() in CRITICAL_GALLERY_KEYS
 
 
 def fetch_with_retry(fetcher: ForumFetcher, url: str, retries: int = 3) -> str:
@@ -479,15 +521,15 @@ def parse_gallery_source(source, html: str) -> list[FeedItem]:
         FeedItem 列表。
     """
     parser_kind = source.parser_kind
+    if parser_kind == "mzt":
+        return parse_mzt_api_items(html, source.source_url, PAGE_SIZE)
     if parser_kind == "auto":
-        parser_kind = infer_gallery_parser_kind(source.source_url)
-    if parser_kind == "rss":
-        return parse_rss_items(html, source.source_url, PAGE_SIZE)
-    if source.parser_kind == "auto":
         # 自动模式先尝试 RSS/Atom；非 XML 页面再回退到图集链接解析。
         rss_items = parse_rss_items(html, source.source_url, PAGE_SIZE)
         if rss_items:
             return rss_items
+    elif parser_kind == "rss":
+        return parse_rss_items(html, source.source_url, PAGE_SIZE)
     return parse_link_gallery_items(
         html,
         source.source_url,
@@ -515,7 +557,8 @@ def fetch_single_gallery(
         (source, items, error) 三元组，成功时 error 为 None。
     """
     try:
-        html = fetch_with_retry(fetcher, source.source_url)
+        retries = CRITICAL_RETRIES if is_critical_gallery(source) else DEFAULT_RETRIES
+        html = fetch_with_retry(fetcher, source.source_url, retries=retries)
         items = parse_gallery_source(source, html)
         if not items:
             raise RuntimeError("empty gallery list")
@@ -533,33 +576,41 @@ def fetch_single_gallery(
 
 
 def build_gallery_feeds(
-    fetcher: ForumFetcher, output_dir: Path, public_base_url: str
+    fetcher: ForumFetcher,
+    output_dir: Path,
+    public_base_url: str,
+    fetchers_by_host: dict | None = None,
 ) -> list:
     """并行抓取全部图站并生成独立 feed 与聚合文件。
 
     不同图站主机使用线程池并行抓取，同一主机仍共享限速器。
     参数：
-        fetcher: 下载器（图站模式各线程独立请求）。
+        fetcher: 提供下载配置的模板下载器。
         output_dir: 输出目录。
         public_base_url: 对外基础地址。
+        fetchers_by_host: 可选的已有主机映射，用于与论坛构建共享限速器。
     返回值：
         失败来源的 key 列表。
     """
     sources = load_validated_gallery_sources(public_base_url)
     failures = []
     results_by_key = {}
-    fetchers_by_host = build_gallery_fetchers(fetcher, sources)
+    host_fetchers = build_gallery_fetchers(fetcher, sources, fetchers_by_host)
+    prioritized_sources = sorted(
+        sources,
+        key=lambda source: not is_critical_gallery(source),
+    )
 
     with ThreadPoolExecutor(max_workers=GALLERY_WORKERS) as pool:
         futures = {
             pool.submit(
                 fetch_single_gallery,
                 source,
-                fetchers_by_host[get_gallery_host(source.source_url)],
+                host_fetchers[get_gallery_host(source.source_url)],
                 output_dir,
                 public_base_url,
             ): source
-            for source in sources
+            for source in prioritized_sources
         }
         for future in as_completed(futures):
             source, items, error = future.result()
@@ -610,7 +661,10 @@ def build_gallery_opml(output_dir: Path, public_base_url: str) -> None:
 
 
 def build_forum_feeds(
-    fetcher: ForumFetcher, output_dir: Path, public_base_url: str
+    fetcher: ForumFetcher,
+    output_dir: Path,
+    public_base_url: str,
+    fetchers_by_host: dict | None = None,
 ) -> list:
     """Fetch forum A and B feeds, write to output dir.
 
@@ -618,6 +672,7 @@ def build_forum_feeds(
         fetcher: Rate-limited fetcher.
         output_dir: Output directory.
         public_base_url: Public base URL.
+        fetchers_by_host: Optional host map shared with gallery construction.
     Returns:
         List of failed source keys.
     """
@@ -642,12 +697,17 @@ def build_forum_feeds(
     except (IndexError, KeyError, ValueError) as error:
         raise ValueError("SNAPSHOT_BASE_URL 必须是可格式化的 URL") from error
     validate_http_url(digest_url, "SNAPSHOT_BASE_URL")
-    failures = []
+    host_fetchers = fetchers_by_host if fetchers_by_host is not None else {}
 
-    # 论坛 A 第一页带图帖
+    def get_fetcher(url: str) -> ForumFetcher:
+        return get_host_fetcher(host_fetchers, fetcher, url)
+
+    failures: list[str] = []
+
+    # 论坛 A 第一页带图帖；不同上游主机使用各自的限速器。
     try:
         items_a = fetch_items(
-            fetcher, source_url_a, parse_forum_a_items, keep_images=True
+            get_fetcher(source_url_a), source_url_a, parse_forum_a_items, keep_images=True
         )
         write_feed(
             output_dir, "rss.xml", feed_title_a, source_url_a, items_a, public_base_url
@@ -655,9 +715,9 @@ def build_forum_feeds(
     except Exception as error:
         failures.append(f"forum-a: {type(error).__name__}")
 
-    # 论坛 A 精华全量
+    # 论坛 A 精华全量（草榴 digest，独立重试，不阻塞后续关键源）
     try:
-        items_digest = fetch_digest_items(fetcher, digest_base_url)
+        items_digest = fetch_digest_items(get_fetcher(digest_url), digest_base_url)
         write_feed(
             output_dir,
             "caoliu-digest.xml",
@@ -675,7 +735,7 @@ def build_forum_feeds(
         try:
             url = f"{forum_b_base}/forumdisplay.php?fid={fid}"
             items = fetch_b_section_items(
-                fetcher, forum_b_base, fid, b_page_limit
+                get_fetcher(url), forum_b_base, fid, b_page_limit
             )
             section_items[fid] = items
             write_feed(
@@ -691,7 +751,7 @@ def build_forum_feeds(
 
     # 论坛 B 首页精选（解析器无图片过滤参数，单独调用）
     try:
-        home_html = fetch_with_retry(fetcher, forum_b_index)
+        home_html = fetch_with_retry(get_fetcher(forum_b_index), forum_b_index)
         items_home = parse_forum_b_home_items(home_html, forum_b_index, PAGE_SIZE)
         write_feed(
             output_dir,
@@ -729,7 +789,12 @@ def build_forum_feeds(
         for fid in section_names:
             try:
                 items = fetch_b_digest_items(
-                    fetcher, forum_b_base, fid, digest_page_limit
+                    get_fetcher(
+                        f"{forum_b_base}/forumdisplay.php?fid={fid}&filter=digest"
+                    ),
+                    forum_b_base,
+                    fid,
+                    digest_page_limit,
                 )
                 for item in items:
                     if item.thread_id not in digest_seen:
@@ -814,8 +879,23 @@ def main() -> None:
         report_failures(failures)
         return
 
-    failures.extend(build_forum_feeds(fetcher, output_dir, public_base_url))
-    failures.extend(build_gallery_feeds(fetcher, output_dir, public_base_url))
+    fetchers_by_host: dict[str, ForumFetcher] = {}
+    failures.extend(
+        build_forum_feeds(
+            fetcher,
+            output_dir,
+            public_base_url,
+            fetchers_by_host,
+        )
+    )
+    failures.extend(
+        build_gallery_feeds(
+            fetcher,
+            output_dir,
+            public_base_url,
+            fetchers_by_host,
+        )
+    )
     build_gallery_opml(output_dir, public_base_url)
 
     report_failures(failures)

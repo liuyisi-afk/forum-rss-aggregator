@@ -102,12 +102,47 @@ def test_parse_gallery_source_auto_detects_rss() -> None:
 
 def test_parse_gallery_source_auto_falls_back_to_links() -> None:
     """auto 模式遇到普通首页时应继续解析图集链接。"""
-    source = make_source("auto", "https://a.example.com/", parser_kind="auto")
+    source = make_source("auto", "https://a.example.com/feed", parser_kind="auto")
     html = "<a href='/album/1'>一个图集标题</a>"
 
     items = build_feeds.parse_gallery_source(source, html)
 
     assert [item.link for item in items] == ["https://a.example.com/album/1"]
+
+
+def test_parse_gallery_source_dispatches_mzt_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证静态构建器将 mzt 来源分发给 JSON API 解析器。"""
+    source = make_source(
+        "mzt",
+        "https://mzt.example.com/urls?page=1&pageSize=50",
+        parser_kind="mzt",
+    )
+    expected_items = [
+        FeedItem(
+            thread_id="mzt:one",
+            title="图集",
+            link="https://mzt.example.com/view/one",
+            author=None,
+            published_at=None,
+        )
+    ]
+    observed_arguments = []
+
+    def fake_parse_mzt(html: str, base_url: str, max_items: int) -> list[FeedItem]:
+        """记录静态构建器传给 mzt 解析器的参数并返回固定条目。"""
+        observed_arguments.append((html, base_url, max_items))
+        return expected_items
+
+    monkeypatch.setattr(build_feeds, "parse_mzt_api_items", fake_parse_mzt)
+
+    items = build_feeds.parse_gallery_source(source, '{"items": []}')
+
+    assert items == expected_items
+    assert observed_arguments == [
+        ('{"items": []}', source.source_url, build_feeds.PAGE_SIZE)
+    ]
 
 
 def test_build_gallery_fetchers_share_by_host_and_isolate_hosts() -> None:

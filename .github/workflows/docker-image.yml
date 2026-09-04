@@ -2,16 +2,31 @@ name: Build feeds and deploy to Pages
 
 on:
   schedule:
-    # every 30 minutes: fetch + commit, no CF deploy
-    - cron: "0,30 * * * *"
-    # daily at 05:00 UTC: full digest archive for forum B
+    # Half past every hour.
+    - cron: "30 * * * *"
+    # Top of each ordinary hour, excluding the digest and deploy runs below.
+    - cron: "0 1-4,6-11,13-23 * * *"
+    # Daily at 05:00 UTC: build the full forum B digest.
     - cron: "0 5 * * *"
-    # every 12 hours: deploy to Cloudflare Pages
+    # At 00:00 and 12:00 UTC: refresh feeds and deploy to Cloudflare Pages.
     - cron: "0 0,12 * * *"
   workflow_dispatch:
+    inputs:
+      build_digest:
+        description: "Force BUILD_DIGEST_B (1=full archive, 0=skip)"
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
 
 permissions:
   contents: read
+
+concurrency:
+  group: rss-feeds-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SOURCE_URL: ${{ secrets.SOURCE_URL }}
@@ -22,35 +37,34 @@ env:
   FEED_TITLE_A: ${{ secrets.FEED_TITLE_A }}
   FEED_TITLE_B: ${{ secrets.FEED_TITLE_B }}
   SECTIONS_B: ${{ secrets.SECTIONS_B }}
-  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-  CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
-  CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
 
 jobs:
   build-forum:
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --requirement requirements.txt
 
-      - name: Build forum feeds (91 + caoliu)
+      - name: Build forum feeds
         env:
-          BUILD_DIGEST_B: ${{ github.event.schedule == '0 5 * * *' && '1' || '0' }}
+          BUILD_DIGEST_B: ${{ github.event_name == 'workflow_dispatch' && inputs.build_digest || (github.event.schedule == '0 5 * * *' && '1' || '0') }}
         run: python scripts/build_feeds.py public --only-forum
 
       - name: Upload forum artifacts
         uses: actions/upload-artifact@v4
         with:
           name: forum-feeds
-          # 仅上传论坛构建产物，避免在 merge-deploy 中覆盖图站文件。
           path: |
             public/rss.xml
             public/caoliu-digest.xml
@@ -59,26 +73,28 @@ jobs:
 
   build-gallery:
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --requirement requirements.txt
 
-      - name: Build gallery feeds (parallel)
+      - name: Build gallery feeds
         run: python scripts/build_feeds.py public --only-gallery
 
       - name: Upload gallery artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gallery-feeds
-          # 仅上传图站构建产物，避免把论坛 job 的新文件覆盖为旧 checkout 文件。
           path: |
             public/gallery.xml
             public/gallery/
@@ -88,36 +104,82 @@ jobs:
   merge-deploy:
     needs: [build-forum, build-gallery]
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Download forum feeds
         uses: actions/download-artifact@v4
         with:
           name: forum-feeds
-          path: public/
+          path: ${{ runner.temp }}/forum-feeds
 
       - name: Download gallery feeds
         uses: actions/download-artifact@v4
         with:
           name: gallery-feeds
-          path: public/
+          path: ${{ runner.temp }}/gallery-feeds
 
       - name: Commit feeds back to repo
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public
-          if git diff --cached --quiet; then
-            echo "no feed changes"
-          else
-            git commit -m "chore: refresh RSS feeds [skip ci]"
-            git push
+          set -euo pipefail
+
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "repository default branch is unavailable"
+            exit 1
           fi
 
-      - name: Deploy to Cloudflare Pages (every 12h only)
-        if: github.event.schedule == '0 0,12 * * *' || github.event_name == 'workflow_dispatch'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            echo "push attempt $attempt"
+            if ! git fetch --no-tags origin "refs/heads/$TARGET_BRANCH"; then
+              echo "fetch failed on attempt $attempt"
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$((attempt * 5))"
+              fi
+              continue
+            fi
+            git checkout -B "$TARGET_BRANCH" FETCH_HEAD
+
+            mkdir -p public
+            cp -a "$RUNNER_TEMP/forum-feeds/." public/
+            cp -a "$RUNNER_TEMP/gallery-feeds/." public/
+            git add public
+
+            if git diff --cached --quiet; then
+              echo "no feed changes"
+              exit 0
+            fi
+
+            git commit -m "chore: refresh RSS feeds [skip ci]"
+            if git push origin "HEAD:refs/heads/$TARGET_BRANCH"; then
+              echo "push succeeded on attempt $attempt"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+
+          echo "push failed after 3 attempts"
+          exit 1
+
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 0,12 * * *'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CF_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL }}
         run: npx --yes wrangler@3 pages deploy public --project-name=rss-feed --branch=main

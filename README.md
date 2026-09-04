@@ -42,7 +42,7 @@
 ## 架构
 
 - 应用（Flask + Gunicorn）监听 `127.0.0.1:28888`，按主机级 10 秒限速抓取索引页。
-- 图站来源配置在 `config/gallery_sources.json`，`rss` 表示直接转发站点自带 RSS，`links` 表示解析首页图集链接。
+- 图站来源配置在 `config/gallery_sources.json`：`rss` 直通站点 RSS，`links` 解析首页图集链接，`auto` 在 RSS 无条目时回退到链接解析，`mzt` 解析妹子图 JSON API。
 - nginx 反向代理到本地应用，80 端口 301 跳转 HTTPS，443 使用源站证书。
 - 可选前置 CDN（如 Cloudflare）：源站证书可由 CDN 的 Origin CA 接口签发，Zone SSL 使用 Full (strict)。
 
